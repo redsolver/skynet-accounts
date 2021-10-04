@@ -41,6 +41,8 @@ func (api *API) buildHTTPRoutes() {
 
 	api.staticRouter.POST("/stripe/webhook", api.WithDBSession(api.noValidate(api.stripeWebhookPOST)))
 	api.staticRouter.GET("/stripe/prices", api.noValidate(api.stripePricesGET))
+	api.staticRouter.GET("/stripe/subscriptions", api.validate(api.stripeSubscriptionsGET))
+	api.staticRouter.POST("/stripe/billing", api.validate(api.stripeBillingPOST))
 
 	api.staticRouter.GET("/.well-known/jwks.json", api.noValidate(api.wellKnownJwksGET))
 }
@@ -111,6 +113,7 @@ func tokenFromRequest(r *http.Request) (string, error) {
 
 // userFromRequest returns a user object based on the JWT within the request.
 // Note that this method does not rely on a token being stored in the context.
+// TODO Do we need this?
 func (api *API) userFromRequest(r *http.Request) *database.User {
 	t, err := tokenFromRequest(r)
 	if err != nil {

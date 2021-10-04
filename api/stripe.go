@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/NebulousLabs/skynet-accounts/database"
+	"github.com/stripe/stripe-go/v71/billingportal/session"
 
 	"github.com/julienschmidt/httprouter"
 	"github.com/stripe/stripe-go/v71"
@@ -179,6 +180,77 @@ func (api *API) stripePricesGET(w http.ResponseWriter, _ *http.Request, _ httpro
 		sPrices = append(sPrices, sp)
 	}
 	api.WriteJSON(w, sPrices)
+}
+
+// stripeSubscriptionsGET fetches the first Stripe subscription that belongs to
+// the user.
+func (api *API) stripeSubscriptionsGET(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
+	u, ok := api.userFromContext(w, req, false)
+	if !ok {
+		return
+	}
+	// TODO We might want to 404 here, so the portal can redirect the user to Stripe's registration page.
+	if u.StripeID == "" {
+		// This might be a bit odd, but it is what the previous implementation
+		// returned and what the portal expects.
+		api.WriteSuccess(w)
+		return
+	}
+	subscriptions := "subscriptions"
+	params := &stripe.CustomerParams{
+		Params: stripe.Params{
+			Expand: []*string{&subscriptions},
+		},
+	}
+	cus, err := customer.Get(u.StripeID, params)
+	if err != nil {
+		err = errors.AddContext(err, "failed to fetch customer subscriptions from Stripe")
+		api.WriteError(w, err, http.StatusInternalServerError)
+		return
+	}
+	if cus.Subscriptions.TotalCount == 0 {
+		// This might be a bit odd, but it is what the previous implementation
+		// returned and what the portal expects.
+		api.WriteSuccess(w)
+		return
+	}
+	api.WriteJSON(w, cus.Subscriptions.Data[0])
+}
+
+// stripeBillingPOST creates a new billing session for the user and redirects
+// them to it. If the user does not yet have a Stripe customer, one is
+// registered for them.
+func (api *API) stripeBillingPOST(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
+	u, ok := api.userFromContext(w, req, false)
+	if !ok {
+		return
+	}
+	if u.StripeID == "" {
+		cus, err := customer.New(&stripe.CustomerParams{})
+		if err != nil {
+			api.WriteError(w, errors.AddContext(err, "failed to create Stripe customer"), http.StatusInternalServerError)
+			return
+		}
+		u.StripeID = cus.ID
+		err = api.staticDB.UserSave(req.Context(), u)
+		if err != nil {
+			api.WriteError(w, errors.AddContext(err, "failed to save user's StripeID"), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	params := &stripe.BillingPortalSessionParams{
+		Customer:  stripe.String(u.StripeID),
+		ReturnURL: stripe.String(`${process.env.SKYNET_DASHBOARD_URL}/payments`),
+	}
+	s, err := session.New(params)
+	if err != nil {
+		api.WriteError(w, errors.AddContext(err, "failed to create a Stripe billing portal session"), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Location", s.URL)
+	w.WriteHeader(http.StatusTemporaryRedirect)
+	return
 }
 
 // readStripeEvent reads the event from the request body and verifies its
