@@ -42,7 +42,8 @@ func (api *API) buildHTTPRoutes() {
 	api.staticRouter.POST("/stripe/webhook", api.WithDBSession(api.noValidate(api.stripeWebhookPOST)))
 	api.staticRouter.GET("/stripe/prices", api.noValidate(api.stripePricesGET))
 	api.staticRouter.GET("/stripe/subscriptions", api.validate(api.stripeSubscriptionsGET))
-	api.staticRouter.POST("/stripe/billing", api.validate(api.stripeBillingPOST))
+	api.staticRouter.POST("/stripe/billing", api.WithDBSession(api.validate(api.stripeBillingPOST)))
+	api.staticRouter.POST("/stripe/checkout", api.WithDBSession(api.validate(api.stripeCheckoutPOST)))
 
 	api.staticRouter.GET("/.well-known/jwks.json", api.noValidate(api.wellKnownJwksGET))
 }

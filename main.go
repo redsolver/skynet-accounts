@@ -58,6 +58,9 @@ var (
 	// envStripeAPIKey hold the name of the environment variable for Stripe's
 	// API key. It's only required when integrating with Stripe.
 	envStripeAPIKey = "STRIPE_API_KEY"
+	// envDashboardURL holds the name of the environment variable for the
+	// dashboard address of this portal. Example: https://account.siasky.net
+	envDashboardURL = "SKYNET_DASHBOARD_URL"
 )
 
 // loadDBCredentials creates a new DB connection based on credentials found in
@@ -159,6 +162,9 @@ func main() {
 	}
 	if jwks := os.Getenv(envAccountsJWKSFile); jwks != "" {
 		jwt.AccountsJWKSFile = jwks
+	}
+	if dash := os.Getenv(envDashboardURL); dash != "" {
+		api.DashboardURL = dash
 	}
 	// Fetch configuration data for sending emails.
 	emailURI := os.Getenv(envEmailURI)
