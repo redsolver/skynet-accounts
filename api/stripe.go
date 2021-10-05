@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -90,33 +91,116 @@ type (
 	}
 )
 
-// assignTier sets the user's account to the given tier, both on Stripe's side
-// and in the DB.
-func (api *API) assignTier(ctx context.Context, tier int, u *database.User) error {
-	plan := planForTier(tier)
-	oldTier := u.Tier
-	cp := &stripe.CustomerParams{
-		Plan: &plan,
-	}
-	_, err := customer.Update(u.StripeID, cp)
+// stripeWebhookPOST handles various events issued by Stripe.
+// See https://stripe.com/docs/api/events/types
+func (api *API) stripeWebhookPOST(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
+	api.staticLogger.Tracef("Webhook request: %+v", req)
+	event, code, err := readStripeEvent(w, req)
 	if err != nil {
-		return errors.AddContext(err, "failed to update customer on Stripe")
+		api.WriteError(w, err, code)
+		return
 	}
-	err = api.staticDB.UserSetTier(ctx, u, tier)
+	api.staticLogger.Debugf("Webhook event: %+v", event)
+
+	// Here we handle the entire class of subscription events.
+	// https://stripe.com/docs/billing/subscriptions/overview#build-your-own-handling-for-recurring-charge-failures
+	// https://stripe.com/docs/api/subscriptions/object
+	if strings.Contains(event.Type, "customer.subscription") {
+		var s stripe.Subscription
+		err = json.Unmarshal(event.Data.Raw, &s)
+		if err != nil {
+			api.staticLogger.Warningln("Webhook: Failed to parse event. Error: ", err, "\nEvent: ", string(event.Data.Raw))
+			api.WriteError(w, err, http.StatusBadRequest)
+			return
+		}
+		err = api.processStripeSub(req.Context(), &s)
+		if err != nil {
+			api.staticLogger.Debugln("Webhook: Failed to process sub:", err)
+			api.WriteError(w, err, http.StatusInternalServerError)
+			return
+		}
+		api.WriteSuccess(w)
+		return
+	}
+
+	// Here we handle the entire class of subscription_schedule events.
+	// See https://stripe.com/docs/api/subscription_schedules/object
+	if strings.Contains(event.Type, "subscription_schedule") {
+		var hasSub struct {
+			Sub string `json:"subscription"`
+		}
+		err = json.Unmarshal(event.Data.Raw, &hasSub)
+		if err != nil {
+			api.staticLogger.Warningln("Webhook: Failed to parse event. Error: ", err, "\nEvent: ", string(event.Data.Raw))
+			api.WriteError(w, err, http.StatusBadRequest)
+			return
+		}
+		if hasSub.Sub == "" {
+			api.staticLogger.Debugln("Webhook: Event doesn't refer to a subscription.")
+			api.WriteSuccess(w)
+			return
+		}
+		// Check the details about this subscription:
+		s, err := sub.Get(hasSub.Sub, nil)
+		if err != nil {
+			api.staticLogger.Debugln("Webhook: Failed to fetch sub:", err)
+			api.WriteError(w, err, http.StatusInternalServerError)
+			return
+		}
+		err = api.processStripeSub(req.Context(), s)
+		if err != nil {
+			api.staticLogger.Debugln("Webhook: Failed to process sub:", err)
+			api.WriteError(w, err, http.StatusInternalServerError)
+			return
+		}
+	}
+
+	api.WriteSuccess(w)
+}
+
+// stripePricesGET returns a list of plans and prices.
+func (api *API) stripePricesGET(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
+	var sPrices []stripePrice
+	params := &stripe.PriceListParams{Active: &True}
+	params.AddExpand("data.product")
+	params.Filters.AddFilter("limit", "", "1000")
+	i := price.List(params)
+	for i.Next() {
+		p := i.Price()
+		if !p.Active {
+			continue
+		}
+		sp := stripePrice{
+			ID:          p.ID,
+			Name:        p.Product.Name,
+			Description: p.Product.Description,
+			Tier:        stripePrices()[p.ID],
+			Price:       float64(p.UnitAmount) / 100,
+			Currency:    string(p.Currency),
+			StripeID:    p.ID,
+			ProductID:   p.Product.ID,
+			LiveMode:    p.Livemode,
+		}
+		sPrices = append(sPrices, sp)
+	}
+	api.WriteJSON(w, sPrices)
+}
+
+// readStripeEvent reads the event from the request body and verifies its
+// signature.
+func readStripeEvent(w http.ResponseWriter, req *http.Request) (*stripe.Event, int, error) {
+	req.Body = http.MaxBytesReader(w, req.Body, MaxBodyBytes)
+	payload, err := ioutil.ReadAll(req.Body)
 	if err != nil {
-		err = errors.AddContext(err, "failed to update user in DB")
-		// Try to revert the change on Stripe's side.
-		plan = planForTier(oldTier)
-		cp = &stripe.CustomerParams{
-			Plan: &plan,
-		}
-		_, err2 := customer.Update(u.StripeID, cp)
-		if err2 != nil {
-			err2 = errors.AddContext(err2, "failed to revert the change on Stripe")
-		}
-		return errors.Compose(err, err2)
+		err = errors.AddContext(err, "error reading request body")
+		return nil, http.StatusBadRequest, err
 	}
-	return nil
+	// Read the event and verify its signature.
+	event, err := webhook.ConstructEvent(payload, req.Header.Get("Stripe-Signature"), os.Getenv("STRIPE_WEBHOOK_SECRET"))
+	if err != nil {
+		return nil, http.StatusBadRequest, err
+	}
+	return &event, http.StatusOK, nil
 }
 
 // processStripeSub reads the information about the user's subscription and
@@ -182,6 +266,35 @@ func (api *API) processStripeSub(ctx context.Context, s *stripe.Subscription) er
 		api.staticLogger.Tracef("Subscribed user id %s, tier %d, until %s.", u.ID, u.Tier, u.SubscribedUntil.String())
 	}
 	return err
+}
+
+// assignTier sets the user's account to the given tier, both on Stripe's side
+// and in the DB.
+func (api *API) assignTier(ctx context.Context, tier int, u *database.User) error {
+	plan := planForTier(tier)
+	oldTier := u.Tier
+	cp := &stripe.CustomerParams{
+		Plan: &plan,
+	}
+	_, err := customer.Update(u.StripeID, cp)
+	if err != nil {
+		return errors.AddContext(err, "failed to update customer on Stripe")
+	}
+	err = api.staticDB.UserSetTier(ctx, u, tier)
+	if err != nil {
+		err = errors.AddContext(err, "failed to update user in DB")
+		// Try to revert the change on Stripe's side.
+		plan = planForTier(oldTier)
+		cp = &stripe.CustomerParams{
+			Plan: &plan,
+		}
+		_, err2 := customer.Update(u.StripeID, cp)
+		if err2 != nil {
+			err2 = errors.AddContext(err2, "failed to revert the change on Stripe")
+		}
+		return errors.Compose(err, err2)
+	}
+	return nil
 }
 
 // stripeBillingPOST creates a new billing session for the user and redirects
@@ -279,34 +392,6 @@ func (api *API) stripeCheckoutPOST(w http.ResponseWriter, req *http.Request, _ h
 	api.WriteJSON(w, response)
 }
 
-// stripePricesGET returns a list of plans and prices.
-func (api *API) stripePricesGET(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
-	var sPrices []stripePrice
-	params := &stripe.PriceListParams{Active: &True}
-	params.AddExpand("data.product")
-	params.Filters.AddFilter("limit", "", "1000")
-	i := price.List(params)
-	for i.Next() {
-		p := i.Price()
-		if !p.Active {
-			continue
-		}
-		sp := stripePrice{
-			ID:          p.ID,
-			Name:        p.Product.Name,
-			Description: p.Product.Description,
-			Tier:        stripePrices()[p.ID],
-			Price:       float64(p.UnitAmount) / 100,
-			Currency:    string(p.Currency),
-			StripeID:    p.ID,
-			ProductID:   p.Product.ID,
-			LiveMode:    p.Livemode,
-		}
-		sPrices = append(sPrices, sp)
-	}
-	api.WriteJSON(w, sPrices)
-}
-
 // stripeSubscriptionsGET fetches the first Stripe subscription that belongs to
 // the user.
 func (api *API) stripeSubscriptionsGET(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
@@ -342,73 +427,6 @@ func (api *API) stripeSubscriptionsGET(w http.ResponseWriter, req *http.Request,
 	api.WriteJSON(w, cus.Subscriptions.Data[0])
 }
 
-// stripeWebhookPOST handles various events issued by Stripe.
-// See https://stripe.com/docs/api/events/types
-func (api *API) stripeWebhookPOST(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
-	api.staticLogger.Tracef("Webhook request: %+v", req)
-	event, code, err := readStripeEvent(w, req)
-	if err != nil {
-		api.WriteError(w, err, code)
-		return
-	}
-	api.staticLogger.Debugf("Webhook event: %+v", event)
-
-	// Here we handle the entire class of subscription events.
-	// https://stripe.com/docs/billing/subscriptions/overview#build-your-own-handling-for-recurring-charge-failures
-	// https://stripe.com/docs/api/subscriptions/object
-	if strings.Contains(event.Type, "customer.subscription") {
-		var s stripe.Subscription
-		err = json.Unmarshal(event.Data.Raw, &s)
-		if err != nil {
-			api.staticLogger.Warningln("Webhook: Failed to parse event. Error: ", err, "\nEvent: ", string(event.Data.Raw))
-			api.WriteError(w, err, http.StatusBadRequest)
-			return
-		}
-		err = api.processStripeSub(req.Context(), &s)
-		if err != nil {
-			api.staticLogger.Debugln("Webhook: Failed to process sub:", err)
-			api.WriteError(w, err, http.StatusInternalServerError)
-			return
-		}
-		api.WriteSuccess(w)
-		return
-	}
-
-	// Here we handle the entire class of subscription_schedule events.
-	// See https://stripe.com/docs/api/subscription_schedules/object
-	if strings.Contains(event.Type, "subscription_schedule") {
-		var hasSub struct {
-			Sub string `json:"subscription"`
-		}
-		err = json.Unmarshal(event.Data.Raw, &hasSub)
-		if err != nil {
-			api.staticLogger.Warningln("Webhook: Failed to parse event. Error: ", err, "\nEvent: ", string(event.Data.Raw))
-			api.WriteError(w, err, http.StatusBadRequest)
-			return
-		}
-		if hasSub.Sub == "" {
-			api.staticLogger.Debugln("Webhook: Event doesn't refer to a subscription.")
-			api.WriteSuccess(w)
-			return
-		}
-		// Check the details about this subscription:
-		s, err := sub.Get(hasSub.Sub, nil)
-		if err != nil {
-			api.staticLogger.Debugln("Webhook: Failed to fetch sub:", err)
-			api.WriteError(w, err, http.StatusInternalServerError)
-			return
-		}
-		err = api.processStripeSub(req.Context(), s)
-		if err != nil {
-			api.staticLogger.Debugln("Webhook: Failed to process sub:", err)
-			api.WriteError(w, err, http.StatusInternalServerError)
-			return
-		}
-	}
-
-	api.WriteSuccess(w)
-}
-
 // planForTier is a small helper that returns the proper Stripe plan id for the
 // given Skynet tier.
 func planForTier(t int) string {
@@ -429,23 +447,6 @@ func priceForTier(t int) string {
 		}
 	}
 	return ""
-}
-
-// readStripeEvent reads the event from the request body and verifies its
-// signature.
-func readStripeEvent(w http.ResponseWriter, req *http.Request) (*stripe.Event, int, error) {
-	req.Body = http.MaxBytesReader(w, req.Body, MaxBodyBytes)
-	payload, err := ioutil.ReadAll(req.Body)
-	if err != nil {
-		err = errors.AddContext(err, "error reading request body")
-		return nil, http.StatusBadRequest, err
-	}
-	// Read the event and verify its signature.
-	event, err := webhook.ConstructEvent(payload, req.Header.Get("Stripe-Signature"), os.Getenv("STRIPE_WEBHOOK_SECRET"))
-	if err != nil {
-		return nil, http.StatusBadRequest, err
-	}
-	return &event, http.StatusOK, nil
 }
 
 // stripePlans returns a mapping of Stripe plan ids to Skynet tiers.

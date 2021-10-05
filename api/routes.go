@@ -114,7 +114,6 @@ func tokenFromRequest(r *http.Request) (string, error) {
 
 // userFromRequest returns a user object based on the JWT within the request.
 // Note that this method does not rely on a token being stored in the context.
-// TODO Do we need this?
 func (api *API) userFromRequest(r *http.Request) *database.User {
 	t, err := tokenFromRequest(r)
 	if err != nil {
