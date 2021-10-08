@@ -18,6 +18,7 @@ jobs:
       - name: Run unit tests
         run: make test
       - name: Start MongoDB
+        shell: bash
         run: |
           openssl rand -base64 756 > $(pwd)/mgkey
           chmod 400 $(pwd)/mgkey
