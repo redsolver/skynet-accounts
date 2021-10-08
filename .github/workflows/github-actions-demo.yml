@@ -1,22 +1,22 @@
-name: GitHub Actions Demo
-on: [push]
+name: Skynet Accounts Actions
+on: [ push ]
 jobs:
-  Explore-GitHub-Actions:
+  Tests:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
-      - run: echo "🐧 This job is now running on a ${{ runner.os }} server hosted by GitHub!"
-      - run: echo "🔎 The name of your branch is ${{ github.ref }} and your repository is ${{ github.repository }}."
+      #      - run: echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
+      #      - run: echo "🐧 This job is now running on a ${{ runner.os }} server hosted by GitHub!"
+      #      - run: echo "🔎 The name of your branch is ${{ github.ref }} and your repository is ${{ github.repository }}."
       - name: Check out repository code
         uses: actions/checkout@v2
-      - run: echo "💡 The ${{ github.repository }} repository has been cloned to the runner."
-      - run: echo "🖥️ The workflow is now ready to test your code on the runner."
-      - name: List files in the repository
-        run: |
-          ls ${{ github.workspace }}
-      - run: echo "🍏 This job's status is ${{ job.status }}."
-#      - name: Run tests
-#        run: make test
+      #      - run: echo "💡 The ${{ github.repository }} repository has been cloned to the runner."
+      #      - run: echo "🖥️ The workflow is now ready to test your code on the runner."
+      #      - name: List files in the repository
+      #        run: |
+      #          ls ${{ github.workspace }}
+      #      - run: echo "🍏 This job's status is ${{ job.status }}."
+      - name: Run unit tests
+        run: make test
       - name: Start MongoDB
         run: |
           openssl rand -base64 756 > $(pwd)/mgkey
@@ -30,10 +30,7 @@ jobs:
             -e MONGO_INITDB_ROOT_PASSWORD=aO4tV5tC1oU3oQ7u \
             -v $(pwd)/mgkey:/data/mgkey \
             mongo:4.4.1 mongod --port=17017 --replSet=skynet --keyFile=/data/mgkey
-      - name: Initialise MongoDB replica set
-        run: |
           contID=$(docker ps --latest --quiet)
-          echo $contID
-          sleep 5 && docker exec $contID mongo -u admin -p aO4tV5tC1oU3oQ7u --port 17017 --eval "rs.initiate({_id: \"skynet\", members: [{ _id: 0, host: \"localhost:17017\" }]})"
+          sleep 3 && docker exec $contID mongo -u admin -p aO4tV5tC1oU3oQ7u --port 17017 --eval "rs.initiate({_id: \"skynet\", members: [{ _id: 0, host: \"localhost:17017\" }]})"
       - name: Run integration tests
         run: make test-int
