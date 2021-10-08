@@ -30,8 +30,6 @@ jobs:
             -e MONGO_INITDB_ROOT_PASSWORD=aO4tV5tC1oU3oQ7u \
             -v $(pwd)/mgkey:/data/mgkey \
             mongo:4.4.1 mongod --port=17017 --replSet=skynet --keyFile=/data/mgkey
-      - name: Initialise MongoDB replica set
-        run: |
-          sleep 5 && docker exec $(docker ps --latest --quiet) -u admin -p aO4tV5tC1oU3oQ7u --port 17017 --eval "rs.initiate({_id: \"skynet\", members: [{ _id: 0, host: \"localhost:17017\" }]})"
+          sleep 5 && docker exec $(docker ps --latest --quiet) mongo -u admin -p aO4tV5tC1oU3oQ7u --port 17017 --eval "rs.initiate({_id: \"skynet\", members: [{ _id: 0, host: \"localhost:17017\" }]})"
       - name: Run integration tests
         run: make test-int
