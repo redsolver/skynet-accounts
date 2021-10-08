@@ -22,7 +22,7 @@ jobs:
         run: |
           openssl rand -base64 756 > $(pwd)/mgkey
           chmod 400 $(pwd)/mgkey
-          docker run \
+          (docker run \
             --rm \
             --detach \
             --name skynet-accounts-mongo-test-db \
@@ -30,8 +30,9 @@ jobs:
             -e MONGO_INITDB_ROOT_USERNAME=admin \
             -e MONGO_INITDB_ROOT_PASSWORD=aO4tV5tC1oU3oQ7u \
             -v $(pwd)/mgkey:/data/mgkey \
-            mongo:4.4.1 mongod --port=17017 --replSet=skynet --keyFile=/data/mgkey
-          contID=$(docker ps --latest --quiet)
-          sleep 3 && docker exec $contID mongo -u admin -p aO4tV5tC1oU3oQ7u --port 17017 --eval "rs.initiate({_id: \"skynet\", members: [{ _id: 0, host: \"localhost:17017\" }]})"
+            mongo:4.4.1 mongod --port=17017 --replSet=skynet --keyFile=/data/mgkey) && \
+          (contID=$(docker ps --latest --quiet)) && \
+          (sleep 3) && \
+          (docker exec $contID mongo -u admin -p aO4tV5tC1oU3oQ7u --port 17017 --eval "rs.initiate({_id: \"skynet\", members: [{ _id: 0, host: \"localhost:17017\" }]})")
       - name: Run integration tests
         run: make test-int
