@@ -34,11 +34,12 @@ vet:
 # markdown-spellcheck runs codespell on all markdown files that are not
 # vendored.
 markdown-spellcheck:
+	pip install codespell
 	git ls-files "*.md" :\!:"vendor/**" | xargs codespell --check-filenames
 
 # lint runs golangci-lint (which includes golint, a spellcheck of the codebase,
 # and other linters), the custom analyzers, and also a markdown spellchecker.
-lint: markdown-spellcheck lint-analyze
+lint: clean fmt markdown-spellcheck lint-analyze vet
 	golint ./...
 	golangci-lint run -c .golangci.yml
 	go mod tidy
@@ -113,14 +114,12 @@ bench: clean fmt
 test:
 	go test -short -tags='debug testing netgo' -timeout=5s $(pkgs) -run=. -count=$(count)
 
-test-long: clean fmt vet lint lint-ci
+test-long: lint lint-ci
 	@mkdir -p cover
 	GORACE='$(racevars)' go test -race --coverprofile='./cover/cover.out' -v -failfast -tags='testing debug netgo' -timeout=30s $(pkgs) -run=. -count=$(count)
 
 # test-int always returns a zero exit value! Only use it manually!
 # These env var values are for testing only. They can be freely changed.
-test-int: export COOKIE_HASH_KEY="7eb32cfab5014d14394648dae1cf4e606727eee2267f6a50213cd842e61c5bce"
-test-int: export COOKIE_ENC_KEY="65d31d12b80fc57df16d84c02a9bb62e2bc3b633388b05e49ef8abfdf0d35cf3"
 test-int: test-long start-mongo
 	GORACE='$(racevars)' go test -race -v -tags='testing debug netgo' -timeout=300s $(integration-pkgs) -run=. -count=$(count) ; \
 	make stop-mongo
