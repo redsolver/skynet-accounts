@@ -8,7 +8,7 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/NebulousLabs/skynet-accounts/build"
+	"github.com/SkynetLabs/skynet-accounts/build"
 
 	"github.com/lestrrat-go/jwx/jwa"
 	"github.com/lestrrat-go/jwx/jwk"
@@ -171,7 +171,7 @@ func TokenFromContext(ctx context.Context) (sub string, email string, token jwt.
 		return
 	}
 	s, ok := t.Get("sub")
-	if !ok {
+	if !ok || s.(string) == "" {
 		err = errors.New("sub field missing")
 		return
 	}

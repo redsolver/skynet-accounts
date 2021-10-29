@@ -1,4 +1,4 @@
-module github.com/NebulousLabs/skynet-accounts
+module github.com/SkynetLabs/skynet-accounts
 
 go 1.15
 
@@ -16,6 +16,7 @@ require (
 	github.com/lestrrat-go/jwx v1.2.7
 	github.com/sirupsen/logrus v1.8.1
 	github.com/stripe/stripe-go/v71 v71.48.0
+	github.com/tus/tusd v1.7.1 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20201027041543-1326539a0a0a // indirect
 	gitlab.com/NebulousLabs/errors v0.0.0-20200929122200-06c536cf6975
 	gitlab.com/NebulousLabs/fastrand v0.0.0-20181126182046-603482d69e40

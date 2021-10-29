@@ -7,11 +7,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/NebulousLabs/skynet-accounts/build"
-	"github.com/NebulousLabs/skynet-accounts/hash"
-	"github.com/NebulousLabs/skynet-accounts/jwt"
-	"github.com/NebulousLabs/skynet-accounts/lib"
-	"github.com/NebulousLabs/skynet-accounts/skynet"
+	"github.com/SkynetLabs/skynet-accounts/build"
+	"github.com/SkynetLabs/skynet-accounts/hash"
+	"github.com/SkynetLabs/skynet-accounts/jwt"
+	"github.com/SkynetLabs/skynet-accounts/lib"
+	"github.com/SkynetLabs/skynet-accounts/skynet"
 
 	"gitlab.com/NebulousLabs/errors"
 	"go.mongodb.org/mongo-driver/bson"
@@ -49,8 +49,6 @@ const (
 var (
 	// True is a helper for when we need to pass a *bool to MongoDB.
 	True = true
-	// False is a helper for when we need to pass a *bool to MongoDB.
-	False = false
 	// UserLimits defines the speed limits for each tier.
 	// RegistryDelay delay is in ms.
 	UserLimits = map[int]TierLimits{
@@ -153,22 +151,9 @@ type (
 	}
 )
 
-// UserByEmail returns the user with the given username. If `create` is `true`
-// it will create the user if it doesn't exist.
-func (db *DB) UserByEmail(ctx context.Context, email string, create bool) (*User, error) {
+// UserByEmail returns the user with the given username.
+func (db *DB) UserByEmail(ctx context.Context, email string) (*User, error) {
 	users, err := db.managedUsersByField(ctx, "email", email)
-	if create && errors.Contains(err, ErrUserNotFound) {
-		u, err := db.UserCreate(ctx, email, "", "", TierFree)
-		// If we're successful or hit any error, other than a duplicate key we
-		// want to just return. Hitting a duplicate key error means we ran into
-		// a race condition and we can easily recover from that.
-		if err == nil || !strings.Contains(err.Error(), "E11000 duplicate key error collection") {
-			return u, err
-		}
-		// Recover from the race condition by fetching the existing user from
-		// the DB.
-		users, err = db.managedUsersByField(ctx, "email", email)
-	}
 	if err != nil {
 		return nil, err
 	}
@@ -317,10 +302,7 @@ func (db *DB) UserCreate(ctx context.Context, emailAddr, pass, sub string, tier 
 		return nil, ErrUserAlreadyExists
 	}
 	if sub == "" {
-		sub, err = lib.GenerateUUID()
-		if err != nil {
-			return nil, errors.AddContext(err, "failed to generate user sub")
-		}
+		return nil, errors.New("empty sub is not allowed")
 	}
 	// Check for an existing user with this sub.
 	users, err = db.managedUsersBySub(ctx, sub)
@@ -373,7 +355,26 @@ func (db *DB) UserDelete(ctx context.Context, u *User) error {
 	if u.ID.IsZero() {
 		return errors.AddContext(ErrUserNotFound, "user struct not fully initialised")
 	}
-	filter := bson.D{{"_id", u.ID}}
+	// Delete all data associated with this user.
+	filter := bson.D{{"user_id", u.ID}}
+	_, err := db.staticDownloads.DeleteMany(ctx, filter)
+	if err != nil {
+		return errors.AddContext(err, "failed to delete user downloads")
+	}
+	_, err = db.staticUploads.DeleteMany(ctx, filter)
+	if err != nil {
+		return errors.AddContext(err, "failed to delete user uploads")
+	}
+	_, err = db.staticRegistryReads.DeleteMany(ctx, filter)
+	if err != nil {
+		return errors.AddContext(err, "failed to delete user registry reads")
+	}
+	_, err = db.staticRegistryWrites.DeleteMany(ctx, filter)
+	if err != nil {
+		return errors.AddContext(err, "failed to delete user registry writes")
+	}
+	// Delete the actual user.
+	filter = bson.D{{"_id", u.ID}}
 	dr, err := db.staticUsers.DeleteOne(ctx, filter)
 	if err != nil {
 		return errors.AddContext(err, "failed to Delete")
@@ -489,7 +490,7 @@ func (db *DB) userStats(ctx context.Context, user User) (*UserStats, error) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		n, size, rawStorage, bw, err := db.userUploadStats(ctx, user.ID, startOfMonth)
+		n, size, rawStorage, bw, err := db.UserUploadStats(ctx, user.ID, startOfMonth)
 		if err != nil {
 			regErr("Failed to get user's upload bandwidth used:", err)
 			return
@@ -545,10 +546,10 @@ func (db *DB) userStats(ctx context.Context, user User) (*UserStats, error) {
 	return &stats, nil
 }
 
-// userUploadStats reports on the user's uploads - count, total size and total
+// UserUploadStats reports on the user's uploads - count, total size and total
 // bandwidth used. It uses the total size of the uploaded skyfiles as basis.
-func (db *DB) userUploadStats(ctx context.Context, id primitive.ObjectID, monthStart time.Time) (count int, totalSize int64, rawStorageUsed int64, totalBandwidth int64, err error) {
-	matchStage := bson.D{{"$match", bson.D{{"user_id", id}}}}
+func (db *DB) UserUploadStats(ctx context.Context, id primitive.ObjectID, since time.Time) (count int, totalSize int64, rawStorageUsed int64, totalBandwidth int64, err error) {
+	matchStage := bson.D{{"$match", bson.M{"user_id": id}}}
 	lookupStage := bson.D{
 		{"$lookup", bson.D{
 			{"from", "skylinks"},
@@ -601,7 +602,7 @@ func (db *DB) userUploadStats(ctx context.Context, id primitive.ObjectID, monthS
 		}
 		// We first weed out any old uploads that we fetch only in order to
 		// calculate the total used storage.
-		if result.Timestamp.Before(monthStart) {
+		if result.Timestamp.Before(since) {
 			if result.Unpinned || processedSkylinks[result.Skylink] {
 				continue
 			}

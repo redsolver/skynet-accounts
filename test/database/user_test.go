@@ -3,13 +3,14 @@ package database
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/NebulousLabs/skynet-accounts/database"
-	"github.com/NebulousLabs/skynet-accounts/lib"
-	"github.com/NebulousLabs/skynet-accounts/skynet"
-	"github.com/NebulousLabs/skynet-accounts/test"
+	"github.com/SkynetLabs/skynet-accounts/database"
+	"github.com/SkynetLabs/skynet-accounts/lib"
+	"github.com/SkynetLabs/skynet-accounts/skynet"
+	"github.com/SkynetLabs/skynet-accounts/test"
 	"gitlab.com/NebulousLabs/errors"
 	"gitlab.com/NebulousLabs/fastrand"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -19,20 +20,23 @@ import (
 // This method also tests UserCreate.
 func TestUserByEmail(t *testing.T) {
 	ctx := context.Background()
-	db, err := database.New(ctx, test.DBTestCredentials(), nil)
+	dbName := strings.ReplaceAll(t.Name(), "/", "_")
+	db, err := database.NewCustomDB(ctx, dbName, test.DBTestCredentials(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	email := t.Name() + "@siasky.net"
+	pass := t.Name() + "password"
+	sub := t.Name() + "sub"
 	// Ensure we don't have a user with this email and the method handles that
 	// correctly.
-	_, err = db.UserByEmail(ctx, email, false)
+	_, err = db.UserByEmail(ctx, email)
 	if !errors.Contains(err, database.ErrUserNotFound) {
 		t.Fatalf("Expected error %v, got %v.\n", database.ErrUserNotFound, err)
 	}
-	// Ensure creating a user via this method works as expected.
-	u, err := db.UserByEmail(ctx, email, true)
+	// Create a user to fetch.
+	u, err := db.UserCreate(ctx, email, pass, sub, database.TierFree)
 	if err != nil {
 		t.Fatal("Unexpected error", err)
 	}
@@ -43,7 +47,7 @@ func TestUserByEmail(t *testing.T) {
 		_ = db.UserDelete(ctx, user)
 	}(u)
 	// Ensure that once the user exists, we'll fetch it correctly.
-	u2, err := db.UserByEmail(ctx, email, false)
+	u2, err := db.UserByEmail(ctx, email)
 	if err != nil {
 		t.Fatal("Unexpected error", err)
 	}
@@ -59,7 +63,8 @@ func TestUserByEmail(t *testing.T) {
 // TestUserByID ensures UserByID works as expected.
 func TestUserByID(t *testing.T) {
 	ctx := context.Background()
-	db, err := database.New(ctx, test.DBTestCredentials(), nil)
+	dbName := strings.ReplaceAll(t.Name(), "/", "_")
+	db, err := database.NewCustomDB(ctx, dbName, test.DBTestCredentials(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +102,8 @@ func TestUserByID(t *testing.T) {
 // This method also tests UserCreate and UserSetStripeID.
 func TestUserByStripeID(t *testing.T) {
 	ctx := context.Background()
-	db, err := database.New(ctx, test.DBTestCredentials(), nil)
+	dbName := strings.ReplaceAll(t.Name(), "/", "_")
+	db, err := database.NewCustomDB(ctx, dbName, test.DBTestCredentials(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +146,8 @@ func TestUserByStripeID(t *testing.T) {
 // This method also tests UserCreate.
 func TestUserBySub(t *testing.T) {
 	ctx := context.Background()
-	db, err := database.New(ctx, test.DBTestCredentials(), nil)
+	dbName := strings.ReplaceAll(t.Name(), "/", "_")
+	db, err := database.NewCustomDB(ctx, dbName, test.DBTestCredentials(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +188,8 @@ func TestUserBySub(t *testing.T) {
 // including resecting the expiration of tokens.
 func TestUserConfirmEmail(t *testing.T) {
 	ctx := context.Background()
-	db, err := database.New(ctx, test.DBTestCredentials(), nil)
+	dbName := strings.ReplaceAll(t.Name(), "/", "_")
+	db, err := database.NewCustomDB(ctx, dbName, test.DBTestCredentials(), nil)
 	if err != nil {
 		t.Fatal("Failed to connect to the DB:", err)
 	}
@@ -218,7 +226,8 @@ func TestUserConfirmEmail(t *testing.T) {
 // TestUserCreate ensures UserCreate works as expected.
 func TestUserCreate(t *testing.T) {
 	ctx := context.Background()
-	db, err := database.New(ctx, test.DBTestCredentials(), nil)
+	dbName := strings.ReplaceAll(t.Name(), "/", "_")
+	db, err := database.NewCustomDB(ctx, dbName, test.DBTestCredentials(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +276,8 @@ func TestUserCreate(t *testing.T) {
 // TestUserDelete ensures UserDelete works as expected.
 func TestUserDelete(t *testing.T) {
 	ctx := context.Background()
-	db, err := database.New(ctx, test.DBTestCredentials(), nil)
+	dbName := strings.ReplaceAll(t.Name(), "/", "_")
+	db, err := database.NewCustomDB(ctx, dbName, test.DBTestCredentials(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +314,8 @@ func TestUserDelete(t *testing.T) {
 // TestUserSave ensures that UserSave works as expected.
 func TestUserSave(t *testing.T) {
 	ctx := context.Background()
-	db, err := database.New(ctx, test.DBTestCredentials(), nil)
+	dbName := strings.ReplaceAll(t.Name(), "/", "_")
+	db, err := database.NewCustomDB(ctx, dbName, test.DBTestCredentials(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +360,8 @@ func TestUserSave(t *testing.T) {
 // TestUserSetStripeID ensures that UserSetStripeID works as expected.
 func TestUserSetStripeID(t *testing.T) {
 	ctx := context.Background()
-	db, err := database.New(ctx, test.DBTestCredentials(), nil)
+	dbName := strings.ReplaceAll(t.Name(), "/", "_")
+	db, err := database.NewCustomDB(ctx, dbName, test.DBTestCredentials(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +391,8 @@ func TestUserSetStripeID(t *testing.T) {
 // TestUserSetTier ensures that UserSetTier works as expected.
 func TestUserSetTier(t *testing.T) {
 	ctx := context.Background()
-	db, err := database.New(ctx, test.DBTestCredentials(), nil)
+	dbName := strings.ReplaceAll(t.Name(), "/", "_")
+	db, err := database.NewCustomDB(ctx, dbName, test.DBTestCredentials(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,13 +420,14 @@ func TestUserSetTier(t *testing.T) {
 // TestUserStats ensures we report accurate statistics for users.
 func TestUserStats(t *testing.T) {
 	ctx := context.Background()
-	db, err := database.New(ctx, test.DBTestCredentials(), nil)
+	dbName := strings.ReplaceAll(t.Name(), "/", "_")
+	db, err := database.NewCustomDB(ctx, dbName, test.DBTestCredentials(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Add a test user.
-	sub := string(fastrand.Bytes(UserSubLen))
+	sub := string(fastrand.Bytes(test.UserSubLen))
 	u, err := db.UserCreate(ctx, "user@example.com", "", sub, database.TierPremium5)
 	if err != nil {
 		t.Fatal(err)
@@ -428,7 +442,7 @@ func TestUserStats(t *testing.T) {
 	expectedDownloadBandwidth := int64(0)
 
 	// Create a small upload.
-	skylinkSmall, _, err := CreateTestUpload(ctx, db, u, testUploadSizeSmall)
+	skylinkSmall, _, err := test.CreateTestUpload(ctx, db, u, testUploadSizeSmall)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,7 +462,7 @@ func TestUserStats(t *testing.T) {
 	}
 
 	// Create a big upload.
-	skylinkBig, _, err := CreateTestUpload(ctx, db, u, testUploadSizeBig)
+	skylinkBig, _, err := test.CreateTestUpload(ctx, db, u, testUploadSizeBig)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -10,11 +10,12 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/NebulousLabs/skynet-accounts/database"
-	"github.com/NebulousLabs/skynet-accounts/hash"
-	"github.com/NebulousLabs/skynet-accounts/jwt"
-	"github.com/NebulousLabs/skynet-accounts/lib"
-	"github.com/NebulousLabs/skynet-accounts/metafetcher"
+	"github.com/SkynetLabs/skynet-accounts/build"
+	"github.com/SkynetLabs/skynet-accounts/database"
+	"github.com/SkynetLabs/skynet-accounts/hash"
+	"github.com/SkynetLabs/skynet-accounts/jwt"
+	"github.com/SkynetLabs/skynet-accounts/lib"
+	"github.com/SkynetLabs/skynet-accounts/metafetcher"
 	"github.com/julienschmidt/httprouter"
 	"gitlab.com/NebulousLabs/errors"
 )
@@ -57,20 +58,8 @@ func (api *API) healthGET(w http.ResponseWriter, req *http.Request, _ httprouter
 
 // limitsGET returns the speed limits of this portal.
 func (api *API) limitsGET(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
-	ul := make([]TierLimitsPublic, len(database.UserLimits))
-	for i, t := range database.UserLimits {
-		ul[i] = TierLimitsPublic{
-			TierName:          t.TierName,
-			UploadBandwidth:   t.UploadBandwidth * 8,   // convert from bytes
-			DownloadBandwidth: t.DownloadBandwidth * 8, // convert from bytes
-			MaxUploadSize:     t.MaxUploadSize,
-			MaxNumberUploads:  t.MaxNumberUploads,
-			RegistryDelay:     t.RegistryDelay,
-			Storage:           t.Storage,
-		}
-	}
 	resp := LimitsPublic{
-		UserLimits: ul,
+		UserLimits: api.staticTierLimits,
 	}
 	api.WriteJSON(w, resp)
 }
@@ -97,7 +86,7 @@ func (api *API) loginPOST(w http.ResponseWriter, req *http.Request, _ httprouter
 // loginPOSTCredentials is a helper that handles logins with credentials.
 func (api *API) loginPOSTCredentials(w http.ResponseWriter, req *http.Request, email, password string) {
 	// Fetch the user with that email, if they exist.
-	u, err := api.staticDB.UserByEmail(req.Context(), email, false)
+	u, err := api.staticDB.UserByEmail(req.Context(), email)
 	if err != nil {
 		api.staticLogger.Tracef("Error fetching a user with email '%s': %+v\n", email, err)
 		api.WriteError(w, err, http.StatusUnauthorized)
@@ -109,7 +98,7 @@ func (api *API) loginPOSTCredentials(w http.ResponseWriter, req *http.Request, e
 		api.WriteError(w, errors.New("password mismatch"), http.StatusUnauthorized)
 		return
 	}
-	api.loginUser(w, u)
+	api.loginUser(w, u, false)
 }
 
 // loginPOSTToken is a helper that handles logins via a token attached to the
@@ -143,7 +132,7 @@ func (api *API) loginPOSTToken(w http.ResponseWriter, req *http.Request) {
 
 // loginUser is a helper method that generates a JWT for the user and writes the
 // login cookie.
-func (api *API) loginUser(w http.ResponseWriter, u *database.User) {
+func (api *API) loginUser(w http.ResponseWriter, u *database.User, returnUser bool) {
 	// Generate a JWT.
 	tk, tkBytes, err := jwt.TokenForUser(u.Email, u.Sub)
 	if err != nil {
@@ -159,7 +148,11 @@ func (api *API) loginUser(w http.ResponseWriter, u *database.User) {
 		api.WriteError(w, err, http.StatusInternalServerError)
 		return
 	}
-	api.WriteSuccess(w)
+	if returnUser {
+		api.WriteJSON(w, u)
+	} else {
+		api.WriteSuccess(w)
+	}
 }
 
 // logoutPOST ends a user session by removing a cookie
@@ -192,6 +185,7 @@ func (api *API) userGET(w http.ResponseWriter, req *http.Request, _ httprouter.P
 		api.WriteError(w, err, http.StatusInternalServerError)
 		return
 	}
+	// TODO Remove this when we remove Kratos.
 	// Check if the user's details have changed and update them if necessary.
 	// We only do it here, instead of baking this into UserBySub because we only
 	// care about this information being correct when we're going to present it
@@ -212,12 +206,40 @@ func (api *API) userGET(w http.ResponseWriter, req *http.Request, _ httprouter.P
 
 // userLimitsGET returns the speed limits which apply to this user.
 func (api *API) userLimitsGET(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
-	u := api.userFromRequest(req)
-	if u == nil || u.QuotaExceeded {
+	t, err := tokenFromRequest(req)
+	if err != nil {
 		api.WriteJSON(w, database.UserLimits[database.TierAnonymous])
 		return
 	}
-	api.WriteJSON(w, database.UserLimits[u.Tier])
+	tk, err := jwt.ValidateToken(t)
+	if err != nil {
+		api.WriteJSON(w, database.UserLimits[database.TierAnonymous])
+		return
+	}
+	s, exists := tk.Get("sub")
+	if !exists {
+		api.staticLogger.Warnln("Token without a sub.")
+		api.WriteJSON(w, database.UserLimits[database.TierAnonymous])
+		return
+	}
+	sub := s.(string)
+	// If the user is not cached, or they were cached too long ago we'll fetch
+	// their data from the DB.
+	tier, ok := api.staticUserTierCache.Get(sub)
+	if !ok {
+		u, err := api.staticDB.UserBySub(req.Context(), sub, false)
+		if err != nil {
+			api.staticLogger.Debugf("Failed to fetch user from DB for sub '%s'. Error: %s", sub, err.Error())
+			api.WriteJSON(w, database.UserLimits[database.TierAnonymous])
+			return
+		}
+		api.staticUserTierCache.Set(u)
+	}
+	tier, ok = api.staticUserTierCache.Get(sub)
+	if !ok {
+		build.Critical("Failed to fetch user from UserTierCache right after setting it.")
+	}
+	api.WriteJSON(w, database.UserLimits[tier])
 }
 
 // userStatsGET returns statistics about an existing user.
@@ -244,6 +266,35 @@ func (api *API) userStatsGET(w http.ResponseWriter, req *http.Request, _ httprou
 	api.WriteJSON(w, us)
 }
 
+// userDELETE deletes the user and all of their data.
+func (api *API) userDELETE(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
+	ctx := req.Context()
+	sub, _, _, err := jwt.TokenFromContext(ctx)
+	if err != nil {
+		api.WriteError(w, err, http.StatusUnauthorized)
+		return
+	}
+	u, err := api.staticDB.UserBySub(ctx, sub, false)
+	if errors.Contains(err, database.ErrUserNotFound) {
+		api.WriteError(w, err, http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		api.WriteError(w, err, http.StatusInternalServerError)
+		return
+	}
+	err = api.staticDB.UserDelete(ctx, u)
+	if errors.Contains(err, database.ErrUserNotFound) {
+		api.WriteError(w, err, http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		api.WriteError(w, err, http.StatusInternalServerError)
+		return
+	}
+	api.WriteSuccess(w)
+}
+
 // userPOST creates a new user.
 func (api *API) userPOST(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
 	email := req.PostFormValue("email")
@@ -260,7 +311,17 @@ func (api *API) userPOST(w http.ResponseWriter, req *http.Request, _ httprouter.
 		api.WriteError(w, errors.New("password is required"), http.StatusBadRequest)
 		return
 	}
-	u, err := api.staticDB.UserCreate(req.Context(), email, pw, "", database.TierFree)
+	// We are generating the sub here and not in UserCreate because there are
+	// many reasons to call UserCreate but this handler is the only place (so
+	// far) that should be allowed to call it without a sub. The reason for that
+	// is that the users created here are the only users we do not need to link
+	// to CockroachDB via their subs.
+	sub, err := lib.GenerateUUID()
+	if err != nil {
+		api.WriteError(w, errors.AddContext(err, "failed to generate user sub"), http.StatusInternalServerError)
+		return
+	}
+	u, err := api.staticDB.UserCreate(req.Context(), email, pw, sub, database.TierFree)
 	if errors.Contains(err, database.ErrUserAlreadyExists) {
 		api.WriteError(w, err, http.StatusBadRequest)
 		return
@@ -350,7 +411,7 @@ func (api *API) userPUT(w http.ResponseWriter, req *http.Request, _ httprouter.P
 		// Strip any names from the email and leave just the address.
 		payload.Email = a.Address
 		// Check if another user already has this email address.
-		eu, err := api.staticDB.UserByEmail(req.Context(), payload.Email, false)
+		eu, err := api.staticDB.UserByEmail(req.Context(), payload.Email)
 		if err != nil && !errors.Contains(err, database.ErrUserNotFound) {
 			api.WriteError(w, err, http.StatusInternalServerError)
 			return
@@ -384,7 +445,7 @@ func (api *API) userPUT(w http.ResponseWriter, req *http.Request, _ httprouter.P
 			api.staticLogger.Debugln(errors.AddContext(err, "failed to send address confirmation email"))
 		}
 	}
-	api.WriteJSON(w, u)
+	api.loginUser(w, u, true)
 }
 
 // userUploadsGET returns all uploads made by the current user.
@@ -469,12 +530,8 @@ func (api *API) userConfirmGET(w http.ResponseWriter, req *http.Request, _ httpr
 		return
 	}
 	token := req.Form.Get("token")
-	if token == "" {
-		api.WriteError(w, errors.New("required parameter 'token' is missing"), http.StatusBadRequest)
-		return
-	}
 	u, err := api.staticDB.UserConfirmEmail(req.Context(), token)
-	if errors.Contains(err, database.ErrInvalidToken) {
+	if errors.Contains(err, database.ErrInvalidToken) || errors.Contains(err, database.ErrUserNotFound) {
 		api.WriteError(w, err, http.StatusBadRequest)
 		return
 	}
@@ -482,7 +539,7 @@ func (api *API) userConfirmGET(w http.ResponseWriter, req *http.Request, _ httpr
 		api.WriteError(w, err, http.StatusInternalServerError)
 		return
 	}
-	api.loginUser(w, u)
+	api.loginUser(w, u, false)
 }
 
 // userReconfirmPOST allows the user to request a new email address confirmation
@@ -532,7 +589,7 @@ func (api *API) userRecoverGET(w http.ResponseWriter, req *http.Request, _ httpr
 		api.WriteError(w, errors.New("missing required parameter 'email'"), http.StatusBadRequest)
 		return
 	}
-	u, err := api.staticDB.UserByEmail(req.Context(), email, false)
+	u, err := api.staticDB.UserByEmail(req.Context(), email)
 	if errors.Contains(err, database.ErrUserNotFound) {
 		// Someone tried to recover an account with an email that's not in our
 		// database. It's possible that this is a user who forgot which email
@@ -621,7 +678,7 @@ func (api *API) userRecoverPOST(w http.ResponseWriter, req *http.Request, _ http
 		api.WriteError(w, errors.AddContext(err, "failed to save password"), http.StatusInternalServerError)
 		return
 	}
-	api.loginUser(w, u)
+	api.loginUser(w, u, false)
 }
 
 // trackUploadPOST registers a new upload in the system.
@@ -824,19 +881,21 @@ func (api *API) userUploadsDELETE(w http.ResponseWriter, req *http.Request, ps h
 // checkUserQuotas compares the resources consumed by the user to their quotas
 // and sets the QuotaExceeded flag on their account if they exceed any.
 func (api *API) checkUserQuotas(ctx context.Context, u *database.User) {
-	us, err := api.staticDB.UserStats(ctx, *u)
+	startOfTime := time.Time{}
+	numUploads, storageUsed, _, _, err := api.staticDB.UserUploadStats(ctx, u.ID, startOfTime)
 	if err != nil {
-		api.staticLogger.Infof("Failed to fetch user's stats. UID: %s, err: %s", u.ID.Hex(), err.Error())
+		api.staticLogger.Debugln("Failed to get user's upload bandwidth used:", err)
 		return
 	}
-	q := database.UserLimits[u.Tier]
-	quotaExceeded := us.NumUploads > q.MaxNumberUploads || us.TotalUploadsSize > q.Storage
+	quota := database.UserLimits[u.Tier]
+	quotaExceeded := numUploads > quota.MaxNumberUploads || storageUsed > quota.Storage
 	if quotaExceeded != u.QuotaExceeded {
 		u.QuotaExceeded = quotaExceeded
 		err = api.staticDB.UserSave(ctx, u)
 		if err != nil {
 			api.staticLogger.Infof("Failed to save user. User: %+v, err: %s", u, err.Error())
 		}
+		api.staticUserTierCache.Set(u)
 	}
 }
 

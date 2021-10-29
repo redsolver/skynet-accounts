@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/NebulousLabs/skynet-accounts/database"
+	"github.com/SkynetLabs/skynet-accounts/database"
 
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -54,10 +54,15 @@ func New(ctx context.Context, db *database.DB, logger *logrus.Logger) *MetaFetch
 // incoming message in a separate goroutine.
 func (mf *MetaFetcher) threadedStartQueueWatcher(ctx context.Context) {
 	for m := range mf.Queue {
-		// Process each message in a separate goroutine because fetching the
-		// meta might take a long time (30 seconds) and we don't want to block
-		// the queue.
-		go mf.processMessage(ctx, m)
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			// Process each message in a separate goroutine because fetching the
+			// meta might take a long time (30 seconds) and we don't want to block
+			// the queue.
+			go mf.processMessage(ctx, m)
+		}
 	}
 }
 

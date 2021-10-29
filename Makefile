@@ -3,8 +3,8 @@ BUILD_TIME=$(shell date)
 GIT_REVISION=$(shell git rev-parse --short HEAD)
 GIT_DIRTY=$(shell git diff-index --quiet HEAD -- || echo "✗-")
 
-ldflags= -X github.com/NebulousLabs/skynet-accounts/build.GitRevision=${GIT_DIRTY}${GIT_REVISION} \
--X "github.com/NebulousLabs/skynet-accounts/build.BuildTime=${BUILD_TIME}"
+ldflags= -X github.com/SkynetLabs/skynet-accounts/build.GitRevision=${GIT_DIRTY}${GIT_REVISION} \
+-X "github.com/SkynetLabs/skynet-accounts/build.BuildTime=${BUILD_TIME}"
 
 racevars= history_size=3 halt_on_error=1 atexit_sleep_ms=2000
 
@@ -59,10 +59,11 @@ endif
 # We first prepare for the start of the container by making sure the test
 # keyfile has the right permissions, then we clear any potential leftover
 # containers with the same name. After we start the container we initialise a
-# single node replica set.
+# single node replica set. All the output is discarded because it's noisy and
+# if it causes a failure we'll immediately know where it is even without it.
 start-mongo:
-	-docker stop skynet-accounts-mongo-test-db
-	-docker rm skynet-accounts-mongo-test-db
+	-docker stop skynet-accounts-mongo-test-db 1>/dev/null 2>&1
+	-docker rm skynet-accounts-mongo-test-db 1>/dev/null 2>&1
 	chmod 400 $(shell pwd)/test/fixtures/mongo_keyfile
 	docker run \
      --rm \
@@ -72,10 +73,11 @@ start-mongo:
      -e MONGO_INITDB_ROOT_USERNAME=admin \
      -e MONGO_INITDB_ROOT_PASSWORD=aO4tV5tC1oU3oQ7u \
      -v $(shell pwd)/test/fixtures/mongo_keyfile:/data/mgkey \
-	mongo:4.4.1 mongod --port=17017 --replSet=skynet --keyFile=/data/mgkey
-	sleep 3 # wait for mongo to start before we try to configure it
+	mongo:4.4.1 mongod --port=17017 --replSet=skynet --keyFile=/data/mgkey 1>/dev/null 2>&1
+	# wait for mongo to start before we try to configure it
+	sleep 3
 	# Initialise a single node replica set.
-	docker exec skynet-accounts-mongo-test-db mongo -u admin -p aO4tV5tC1oU3oQ7u --port 17017 --eval "rs.initiate({_id: \"skynet\", members: [{ _id: 0, host: \"localhost:17017\" }]})"
+	docker exec skynet-accounts-mongo-test-db mongo -u admin -p aO4tV5tC1oU3oQ7u --port 17017 --eval "rs.initiate({_id: \"skynet\", members: [{ _id: 0, host: \"localhost:17017\" }]})" 1>/dev/null 2>&1
 
 stop-mongo:
 	-docker stop skynet-accounts-mongo-test-db
@@ -117,10 +119,16 @@ test-long: lint lint-ci
 
 # test-int always returns a zero exit value! Only use it manually!
 # These env var values are for testing only. They can be freely changed.
-test-int: export COOKIE_HASH_KEY="7eb32cfab5014d14394648dae1cf4e606727eee2267f6a50213cd842e61c5bce"
-test-int: export COOKIE_ENC_KEY="65d31d12b80fc57df16d84c02a9bb62e2bc3b633388b05e49ef8abfdf0d35cf3"
 test-int: test-long start-mongo
-	GORACE='$(racevars)' go test -race -v -tags='testing debug netgo' -timeout=300s $(integration-pkgs) -run=. -count=$(count) ; \
-	make stop-mongo
+	GORACE='$(racevars)' go test -race -v -tags='testing debug netgo' -timeout=300s $(integration-pkgs) -run=. -count=$(count)
+	-make stop-mongo
 
-.PHONY: all fmt install release clean check test test-int test-long stop-mongo
+# test-single allows us to run a single integration test.
+# Make sure to start MongoDB yourself!
+# Example: make test-single RUN=TestHandlers
+test-single: export COOKIE_HASH_KEY="7eb32cfab5014d14394648dae1cf4e606727eee2267f6a50213cd842e61c5bce"
+test-single: export COOKIE_ENC_KEY="65d31d12b80fc57df16d84c02a9bb62e2bc3b633388b05e49ef8abfdf0d35cf3"
+test-single:
+	GORACE='$(racevars)' go test -race -v -tags='testing debug netgo' -timeout=300s $(integration-pkgs) -run=$(RUN) -count=$(count)
+
+.PHONY: all fmt install release clean check test test-int test-long test-single stop-mongo

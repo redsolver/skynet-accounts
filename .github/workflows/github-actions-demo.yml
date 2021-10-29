@@ -4,9 +4,6 @@ jobs:
   Test:
     runs-on: ubuntu-latest
     steps:
-      #      - run: echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
-      #      - run: echo "🐧 This job is now running on a ${{ runner.os }} server hosted by GitHub!"
-      #      - run: echo "🔎 The name of your branch is ${{ github.ref }} and your repository is ${{ github.repository }}."
       - name: Check out repository code
         uses: actions/checkout@v2
       - uses: actions/setup-go@v2
@@ -18,12 +15,6 @@ jobs:
         run: go get -u gitlab.com/NebulousLabs/analyze
       - name: Install golangci-lint
         run: curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.42.1
-      #      - run: echo "💡 The ${{ github.repository }} repository has been cloned to the runner."
-      #      - run: echo "🖥️ The workflow is now ready to test your code on the runner."
-      #      - name: List files in the repository
-      #        run: |
-      #          ls ${{ github.workspace }}
-      #      - run: echo "🍏 This job's status is ${{ job.status }}."
       - name: Lint
         run: make lint
       - name: Run unit tests
@@ -42,7 +33,7 @@ jobs:
             -e MONGO_INITDB_ROOT_PASSWORD=aO4tV5tC1oU3oQ7u \
             -v $(pwd)/mgkey:/data/mgkey \
             mongo:4.4.1 mongod --port=17017 --replSet=skynet --keyFile=/data/mgkey) && \
-          (sleep 3) && \
+          (sleep 5) && \
           (docker exec $(docker ps --latest --quiet) mongo -u admin -p aO4tV5tC1oU3oQ7u --port 17017 --eval "rs.initiate({_id: \"skynet\", members: [{ _id: 0, host: \"localhost:17017\" }]})")
       - name: Run integration tests
         run: make test-int

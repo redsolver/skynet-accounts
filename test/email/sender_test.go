@@ -3,14 +3,15 @@ package email
 import (
 	"context"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/NebulousLabs/skynet-accounts/database"
-	"github.com/NebulousLabs/skynet-accounts/email"
-	"github.com/NebulousLabs/skynet-accounts/test"
+	"github.com/SkynetLabs/skynet-accounts/database"
+	"github.com/SkynetLabs/skynet-accounts/email"
+	"github.com/SkynetLabs/skynet-accounts/test"
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -21,7 +22,8 @@ import (
 func TestSender(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	db, err := database.New(ctx, test.DBTestCredentials(), nil)
+	dbName := strings.ReplaceAll(t.Name(), "/", "_")
+	db, err := database.NewCustomDB(ctx, dbName, test.DBTestCredentials(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,6 +73,7 @@ func TestSender(t *testing.T) {
 		t.Fatalf("Expected 1 email in the DB, got %d\n", len(emails))
 	}
 	if emails[0].SentAt.IsZero() {
+		emails[0].Body = "<<<Body removed for logging brevity.>>>"
 		t.Fatalf("Email not sent. Email: %+v\n", emails[0])
 	}
 }
@@ -80,8 +83,9 @@ func TestSender(t *testing.T) {
 // creating and "sending" emails.
 func TestContendingSenders(t *testing.T) {
 	ctx := context.Background()
+	dbName := strings.ReplaceAll(t.Name(), "/", "_")
 	logger := logrus.New()
-	db, err := database.New(ctx, test.DBTestCredentials(), logger)
+	db, err := database.NewCustomDB(ctx, dbName, test.DBTestCredentials(), logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +137,7 @@ func TestContendingSenders(t *testing.T) {
 			}
 		}
 	}
-	// Start some generators and some senders. Make sire the number of messages
+	// Start some generators and some senders. Make sure the number of messages
 	// to be sent divides without remainder by the number of generators.
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
