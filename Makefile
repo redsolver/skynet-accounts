@@ -55,7 +55,6 @@ ifneq ("$(OS)","Windows_NT")
 	go mod tidy
 endif
 
-
 # Credentials and port we are going to use for our test MongoDB instance.
 MONGO_USER=admin
 MONGO_PASSWORD=aO4tV5tC1oU3oQ7u
@@ -70,7 +69,14 @@ endef
 # start-mongo starts a local mongoDB container with no persistence.
 # We first prepare for the start of the container by making sure the test
 # keyfile has the right permissions, then we clear any potential leftover
-@@ -69,15 +80,19 @@ start-mongo:
+# containers with the same name. After we start the container we initialise a
+# single node replica set. All the output is discarded because it's noisy and
+# if it causes a failure we'll immediately know where it is even without it.
+start-mongo:
+	-docker stop skynet-accounts-mongo-test-db 1>/dev/null 2>&1
+	-docker rm skynet-accounts-mongo-test-db 1>/dev/null 2>&1
+	chmod 400 $(shell pwd)/test/fixtures/mongo_keyfile
+	docker run \
      --rm \
      --detach \
      --name skynet-accounts-mongo-test-db \
@@ -87,6 +93,7 @@ endef
 	done
 	# Initialise a single node replica set.
 	$(call call_mongo,"rs.initiate({_id: \"skynet\", members: [{ _id: 0, host: \"localhost:$(MONGO_PORT)\" }]})") 1>/dev/null 2>&1
+
 stop-mongo:
 	-docker stop skynet-accounts-mongo-test-db
 
