@@ -6,138 +6,124 @@ import (
 
 	"github.com/SkynetLabs/skynet-accounts/database"
 	"github.com/SkynetLabs/skynet-accounts/jwt"
-
 	"github.com/julienschmidt/httprouter"
 	"gitlab.com/NebulousLabs/errors"
 )
 
+var (
+	// APIKeyHeader holds the name of the header we use for API keys. This
+	// header name matches the established standard used by Swagger and others.
+	APIKeyHeader = "Skynet-API-Key" // #nosec
+	// ErrAPIKeyNotAllowed is an error returned when an API key was passed to an
+	// endpoint that doesn't allow API key use.
+	ErrAPIKeyNotAllowed = errors.New("this endpoint does not allow the use of API keys")
+	// ErrNoAPIKey is an error returned when we expect an API key but we don't
+	// find one.
+	ErrNoAPIKey = errors.New("no api key found")
+	// ErrNoToken is returned when we expected a JWT token to be provided but it
+	// was not.
+	ErrNoToken = errors.New("no authorisation token found")
+)
+
+type (
+	// HandlerWithUser is a wrapper for httprouter.Handle which also includes
+	// a user parameter. This allows us to fetch the user making the request
+	// just once, during validation.
+	HandlerWithUser func(*database.User, http.ResponseWriter, *http.Request, httprouter.Params)
+)
+
 // buildHTTPRoutes registers all HTTP routes and their handlers.
 func (api *API) buildHTTPRoutes() {
-	api.staticRouter.GET("/health", api.noValidate(api.healthGET))
-	api.staticRouter.GET("/limits", api.noValidate(api.limitsGET))
+	api.staticRouter.GET("/health", api.noAuth(api.healthGET))
+	api.staticRouter.GET("/limits", api.noAuth(api.limitsGET))
 
-	api.staticRouter.GET("/login", api.WithDBSession(api.noValidate(api.loginGET)))
-	api.staticRouter.POST("/login", api.WithDBSession(api.noValidate(api.loginPOST)))
-	api.staticRouter.POST("/logout", api.WithDBSession(api.validate(api.logoutPOST)))
-	api.staticRouter.GET("/register", api.WithDBSession(api.noValidate(api.registerGET)))
-	api.staticRouter.POST("/register", api.WithDBSession(api.noValidate(api.registerPOST)))
+	api.staticRouter.GET("/login", api.WithDBSession(api.noAuth(api.loginGET)))
+	api.staticRouter.POST("/login", api.WithDBSession(api.noAuth(api.loginPOST)))
+	api.staticRouter.POST("/logout", api.withAuth(api.logoutPOST, false))
+	api.staticRouter.GET("/register", api.noAuth(api.registerGET))
+	api.staticRouter.POST("/register", api.WithDBSession(api.noAuth(api.registerPOST)))
 
 	// Endpoints at which Nginx reports portal usage.
-	api.staticRouter.POST("/track/upload/:skylink", api.WithDBSession(api.validate(api.trackUploadPOST)))
-	api.staticRouter.POST("/track/download/:skylink", api.WithDBSession(api.validate(api.trackDownloadPOST)))
-	api.staticRouter.POST("/track/registry/read", api.WithDBSession(api.validate(api.trackRegistryReadPOST)))
-	api.staticRouter.POST("/track/registry/write", api.WithDBSession(api.validate(api.trackRegistryWritePOST)))
+	api.staticRouter.POST("/track/upload/:skylink", api.noAuth(api.trackUploadPOST))
+	api.staticRouter.POST("/track/download/:skylink", api.withAuth(api.trackDownloadPOST, true))
+	api.staticRouter.POST("/track/registry/read", api.withAuth(api.trackRegistryReadPOST, true))
+	api.staticRouter.POST("/track/registry/write", api.withAuth(api.trackRegistryWritePOST, true))
 
-	api.staticRouter.POST("/user", api.WithDBSession(api.noValidate(api.userPOST))) // This will be removed in the future.
-	api.staticRouter.GET("/user", api.WithDBSession(api.validate(api.userGET)))
-	api.staticRouter.PUT("/user", api.WithDBSession(api.validate(api.userPUT)))
-	api.staticRouter.DELETE("/user", api.WithDBSession(api.validate(api.userDELETE)))
-	api.staticRouter.GET("/user/limits", api.noValidate(api.userLimitsGET))
-	api.staticRouter.GET("/user/stats", api.validate(api.userStatsGET))
-	api.staticRouter.GET("/user/pubkey/register", api.WithDBSession(api.validate(api.userPubKeyRegisterGET)))
-	api.staticRouter.POST("/user/pubkey/register", api.WithDBSession(api.validate(api.userPubKeyRegisterPOST)))
-	api.staticRouter.GET("/user/uploads", api.WithDBSession(api.validate(api.userUploadsGET)))
-	api.staticRouter.DELETE("/user/uploads/:skylink", api.WithDBSession(api.validate(api.userUploadsDELETE)))
-	api.staticRouter.GET("/user/downloads", api.WithDBSession(api.validate(api.userDownloadsGET)))
+	api.staticRouter.POST("/user", api.noAuth(api.userPOST)) // This will be removed in the future.
+	api.staticRouter.GET("/user", api.withAuth(api.userGET, false))
+	api.staticRouter.PUT("/user", api.WithDBSession(api.withAuth(api.userPUT, false)))
+	api.staticRouter.DELETE("/user", api.withAuth(api.userDELETE, false))
+	api.staticRouter.GET("/user/limits", api.noAuth(api.userLimitsGET))
+	api.staticRouter.GET("/user/limits/:skylink", api.noAuth(api.userLimitsSkylinkGET))
+	api.staticRouter.GET("/user/stats", api.withAuth(api.userStatsGET, false))
+	api.staticRouter.DELETE("/user/pubkey/:pubKey", api.WithDBSession(api.withAuth(api.userPubKeyDELETE, false)))
+	api.staticRouter.GET("/user/pubkey/register", api.WithDBSession(api.withAuth(api.userPubKeyRegisterGET, false)))
+	api.staticRouter.POST("/user/pubkey/register", api.WithDBSession(api.withAuth(api.userPubKeyRegisterPOST, false)))
+	api.staticRouter.GET("/user/uploads", api.withAuth(api.userUploadsGET, false))
+	api.staticRouter.DELETE("/user/uploads/:skylink", api.withAuth(api.userUploadsDELETE, false))
+	api.staticRouter.GET("/user/downloads", api.withAuth(api.userDownloadsGET, false))
+
+	// Endpoints for user API keys.
+	api.staticRouter.POST("/user/apikeys", api.WithDBSession(api.withAuth(api.userAPIKeyPOST, true)))
+	api.staticRouter.GET("/user/apikeys", api.withAuth(api.userAPIKeyLIST, true))
+	api.staticRouter.GET("/user/apikeys/:id", api.withAuth(api.userAPIKeyGET, true))
+	api.staticRouter.PUT("/user/apikeys/:id", api.WithDBSession(api.withAuth(api.userAPIKeyPUT, true)))
+	api.staticRouter.PATCH("/user/apikeys/:id", api.WithDBSession(api.withAuth(api.userAPIKeyPATCH, true)))
+	api.staticRouter.DELETE("/user/apikeys/:id", api.withAuth(api.userAPIKeyDELETE, true))
 
 	// Endpoints for email communication with the user.
-	api.staticRouter.GET("/user/confirm", api.WithDBSession(api.noValidate(api.userConfirmGET))) // TODO POST
-	api.staticRouter.POST("/user/reconfirm", api.WithDBSession(api.validate(api.userReconfirmPOST)))
-	api.staticRouter.POST("/user/recover/request", api.WithDBSession(api.noValidate(api.userRecoverRequestPOST)))
-	api.staticRouter.POST("/user/recover", api.WithDBSession(api.noValidate(api.userRecoverPOST)))
+	api.staticRouter.GET("/user/confirm", api.WithDBSession(api.noAuth(api.userConfirmGET))) // TODO POST
+	api.staticRouter.POST("/user/reconfirm", api.WithDBSession(api.withAuth(api.userReconfirmPOST, false)))
+	api.staticRouter.POST("/user/recover/request", api.WithDBSession(api.noAuth(api.userRecoverRequestPOST)))
+	api.staticRouter.POST("/user/recover", api.WithDBSession(api.noAuth(api.userRecoverPOST)))
 
-	api.staticRouter.POST("/stripe/webhook", api.WithDBSession(api.noValidate(api.stripeWebhookPOST)))
-	api.staticRouter.GET("/stripe/prices", api.noValidate(api.stripePricesGET))
+	api.staticRouter.GET("/stripe/billing", api.WithDBSession(api.withAuth(api.stripeBillingHANDLER, false)))
+	// `POST /stripe/billing` is deprecated. Please use `GET /stripe/billing`.
+	api.staticRouter.POST("/stripe/billing", api.WithDBSession(api.withAuth(api.stripeBillingHANDLER, false)))
+	api.staticRouter.POST("/stripe/checkout", api.WithDBSession(api.withAuth(api.stripeCheckoutPOST, false)))
+	api.staticRouter.GET("/stripe/prices", api.noAuth(api.stripePricesGET))
+	api.staticRouter.POST("/stripe/webhook", api.WithDBSession(api.noAuth(api.stripeWebhookPOST)))
 
-	api.staticRouter.GET("/.well-known/jwks.json", api.noValidate(api.wellKnownJwksGET))
+	api.staticRouter.GET("/.well-known/jwks.json", api.noAuth(api.wellKnownJWKSGET))
+
+	// Internal endpoint. Never expose these!
+	api.staticRouter.GET("/uploadinfo/:skylink", api.noAuth(api.uploadInfoGET))
 }
 
-// noValidate is a pass-through method used for decorating the request and
+// noAuth is a pass-through method used for decorating the request and
 // logging relevant data.
-func (api *API) noValidate(h httprouter.Handle) httprouter.Handle {
+func (api *API) noAuth(h HandlerWithUser) httprouter.Handle {
 	return func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.logRequest(req)
-		h(w, req, ps)
+		h(nil, w, req, ps)
 	}
 }
 
-// validate ensures that the user making the request has logged in.
-func (api *API) validate(h httprouter.Handle) httprouter.Handle {
+// withAuth ensures that the user making the request has logged in.
+func (api *API) withAuth(h HandlerWithUser, allowsAPIKey bool) httprouter.Handle {
 	return func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 		api.logRequest(req)
-		tokenStr, err := tokenFromRequest(req)
-		if err != nil {
-			api.staticLogger.Debugln("Error fetching token from request:", err)
+		u, token, err := api.userFromRequest(req, allowsAPIKey)
+		if errors.Contains(err, ErrNoAPIKey) || errors.Contains(err, database.ErrInvalidAPIKey) || errors.Contains(err, database.ErrUserNotFound) || errors.Contains(err, ErrAPIKeyNotAllowed) {
 			api.WriteError(w, err, http.StatusUnauthorized)
 			return
 		}
-		token, err := jwt.ValidateToken(tokenStr)
 		if err != nil {
-			api.staticLogger.Debugln("Error validating token:", err)
-			api.WriteError(w, err, http.StatusUnauthorized)
+			api.WriteError(w, err, http.StatusInternalServerError)
 			return
 		}
 		// Embed the verified token in the context of the request.
 		ctx := jwt.ContextWithToken(req.Context(), token)
-		h(w, req.WithContext(ctx), ps)
+		h(u, w, req.WithContext(ctx), ps)
 	}
 }
 
 // logRequest logs information about the current request.
 func (api *API) logRequest(r *http.Request) {
 	hasAuth := strings.HasPrefix(r.Header.Get("Authorization"), "Bearer")
+	hasAPIKey := r.Header.Get(APIKeyHeader) != ""
 	c, err := r.Cookie(CookieName)
 	hasCookie := err == nil && c != nil
-	api.staticLogger.Tracef("Processing request: %v %v, Auth: %v, Skynet Cookie: %v, Referer: %v, Host: %v, RemoreAddr: %v", r.Method, r.URL, hasAuth, hasCookie, r.Referer(), r.Host, r.RemoteAddr)
-}
-
-// tokenFromRequest extracts the JWT token from the request and returns it.
-// It first checks the request headers and then the cookies.
-func tokenFromRequest(r *http.Request) (string, error) {
-	// Check the headers for a token.
-	authHeader := r.Header.Get("Authorization")
-	parts := strings.Split(authHeader, "Bearer")
-	if len(parts) == 2 {
-		return strings.TrimSpace(parts[1]), nil
-	}
-	// Check the cookie for a token.
-	cookie, err := r.Cookie(CookieName)
-	if errors.Contains(err, http.ErrNoCookie) {
-		return "", errors.New("no authorisation token found")
-	}
-	if err != nil {
-		return "", errors.AddContext(err, "cookie exists but it's not valid")
-	}
-	var value string
-	err = secureCookie.Decode(CookieName, cookie.Value, &value)
-	if err != nil {
-		return "", err
-	}
-	return value, nil
-}
-
-// userFromRequest returns a user object based on the JWT within the request.
-// Note that this method does not rely on a token being stored in the context.
-func (api *API) userFromRequest(r *http.Request) *database.User {
-	t, err := tokenFromRequest(r)
-	if err != nil {
-		return nil
-	}
-	token, err := jwt.ValidateToken(t)
-	if err != nil {
-		return nil
-	}
-	tokenMap, err := token.AsMap(r.Context())
-	if err != nil {
-		return nil
-	}
-	sub, exists := tokenMap["sub"]
-	if !exists {
-		return nil
-	}
-	u, err := api.staticDB.UserBySub(r.Context(), sub.(string), false)
-	if err != nil {
-		return nil
-	}
-	return u
+	api.staticLogger.Tracef("Processing request: %v %v, Auth: %v, API Key: %v, Cookie: %v, Referer: %v, Host: %v, RemoreAddr: %v",
+		r.Method, r.URL, hasAuth, hasAPIKey, hasCookie, r.Referer(), r.Host, r.RemoteAddr)
 }

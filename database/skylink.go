@@ -8,7 +8,6 @@ import (
 	"gitlab.com/SkynetLabs/skyd/skymodules"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
@@ -19,8 +18,7 @@ var (
 	// Note: It's important that we match the base32 first because base32 is a
 	// subset of base64, so the base64 regex will match part of the base32 and
 	// return partial data which will be useless.
-	extractSkylinkRE      = regexp.MustCompile("^.*([a-z0-9]{55})|([a-zA-Z0-9-_]{46}).*$")
-	validateSkylinkHashRE = regexp.MustCompile("(^[a-z0-9]{55}$)|(^[a-zA-Z0-9-_]{46}$)")
+	extractSkylinkRE = regexp.MustCompile("^.*([a-z0-9]{55})|([a-zA-Z0-9-_]{46}).*$")
 )
 
 // Skylink represents a skylink object in the DB.
@@ -33,44 +31,28 @@ type Skylink struct {
 // Skylink gets the DB object for the given skylink.
 // If it doesn't exist it creates it.
 func (db *DB) Skylink(ctx context.Context, skylink string) (*Skylink, error) {
-	skylinkHash, err := ExtractSkylinkHash(skylink)
+	skylinkStr, err := ExtractSkylink(skylink)
 	if err != nil {
 		return nil, ErrInvalidSkylink
 	}
 	// Normalise the skylink. We want skylinks to appear in the same format in
 	// the DB, regardless of them being passed as base32 or base64.
 	var sl skymodules.Skylink
-	err = sl.LoadString(skylinkHash)
+	err = sl.LoadString(skylinkStr)
 	if err != nil {
 		return nil, ErrInvalidSkylink
 	}
-	skylinkHash = sl.String()
+	skylinkStr = sl.String()
 	// Provisional skylink object.
 	skylinkRec := Skylink{
-		Skylink: skylinkHash,
+		Skylink: skylinkStr,
 	}
 	// Try to find the skylink in the database.
-	filter := bson.D{{"skylink", skylinkHash}}
-	sr := db.staticSkylinks.FindOne(ctx, filter)
+	filter := bson.M{"skylink": skylinkStr}
+	upsert := bson.M{"$setOnInsert": bson.M{"skylink": skylinkStr}}
+	opts := options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After)
+	sr := db.staticSkylinks.FindOneAndUpdate(ctx, filter, upsert, opts)
 	err = sr.Decode(&skylinkRec)
-	if errors.Contains(err, mongo.ErrNoDocuments) {
-		// It's not there, upsert it. We use upsert instead of insert in order
-		// to avoid races. And we use an update object instead of just passing
-		// the skylink record to UpdateOne because we want to omit the _id in
-		// case it has a zero value. The struct tags instruct the compiler to
-		// omit it when it's empty but that doesn't cover the case where it's
-		// zero because in that case it's a valid array of ints which happen to
-		// be zeros.
-		upsert := bson.M{"$set": bson.M{"skylink": skylinkHash}}
-		opts := options.Update().SetUpsert(true)
-		var ur *mongo.UpdateResult
-		ur, err = db.staticSkylinks.UpdateOne(ctx, filter, upsert, opts)
-		// The UpsertedID might be nil in case the skylink got added to the DB
-		// by another server in between the calls.
-		if err == nil && ur.UpsertedID != nil {
-			skylinkRec.ID = ur.UpsertedID.(primitive.ObjectID)
-		}
-	}
 	if err != nil {
 		return nil, err
 	}
@@ -79,8 +61,7 @@ func (db *DB) Skylink(ctx context.Context, skylink string) (*Skylink, error) {
 
 // SkylinkByID finds a skylink by its ID.
 func (db *DB) SkylinkByID(ctx context.Context, id primitive.ObjectID) (*Skylink, error) {
-	filter := bson.D{{"_id", id}}
-	sr := db.staticSkylinks.FindOne(ctx, filter)
+	sr := db.staticSkylinks.FindOne(ctx, bson.M{"_id": id})
 	var sl Skylink
 	err := sr.Decode(&sl)
 	if err != nil {
@@ -121,9 +102,9 @@ func (db *DB) SkylinkDownloadsUpdate(ctx context.Context, id primitive.ObjectID,
 	return nil
 }
 
-// ExtractSkylinkHash extracts the skylink hash from the given skylink that might
+// ExtractSkylink extracts the skylink from the given skylink URL that might
 // have protocol, path, etc. within it.
-func ExtractSkylinkHash(skylink string) (string, error) {
+func ExtractSkylink(skylink string) (string, error) {
 	m := extractSkylinkRE.FindStringSubmatch(skylink)
 	if len(m) < 3 || (m[1] == "" && m[2] == "") {
 		return "", errors.New("no valid skylink found in string " + skylink)
@@ -134,7 +115,9 @@ func ExtractSkylinkHash(skylink string) (string, error) {
 	return m[2], nil
 }
 
-// ValidSkylinkHash returns true if the given string is a valid skylink hash.
-func ValidSkylinkHash(skylink string) bool {
-	return validateSkylinkHashRE.Match([]byte(skylink))
+// ValidSkylink returns true if the given string is a valid skylink.
+func ValidSkylink(skylink string) bool {
+	var sl skymodules.Skylink
+	err := sl.LoadString(skylink)
+	return err == nil
 }

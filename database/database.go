@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strings"
 
 	"github.com/SkynetLabs/skynet-accounts/lib"
-
 	"github.com/sirupsen/logrus"
 	"gitlab.com/NebulousLabs/errors"
 	"go.mongodb.org/mongo-driver/bson"
@@ -17,37 +17,39 @@ import (
 var (
 	// dbName defines the name of Skynet's database.
 	dbName = "skynet"
-	// dbUsersCollection defines the name of the "users" collection within
+	// collUsers defines the name of the "users" collection within
 	// skynet's database.
-	dbUsersCollection = "users"
-	// dbSkylinksCollection defines the name of the "skylinks" collection within
+	collUsers = "users"
+	// collSkylinks defines the name of the "skylinks" collection within
 	// skynet's database.
-	dbSkylinksCollection = "skylinks"
-	// dbUploadsCollection defines the name of the "uploads" collection within
+	collSkylinks = "skylinks"
+	// collUploads defines the name of the "uploads" collection within
 	// skynet's database.
-	dbUploadsCollection = "uploads"
-	// dbDownloadsCollection defines the name of the "downloads" collection within
+	collUploads = "uploads"
+	// collDownloads defines the name of the "downloads" collection within
 	// skynet's database.
-	dbDownloadsCollection = "downloads"
-	// dbRegistryReadsCollection defines the name of the "registry_reads"
+	collDownloads = "downloads"
+	// collRegistryReads defines the name of the "registry_reads"
 	// collection within skynet's database.
-	dbRegistryReadsCollection = "registry_reads"
-	// dbRegistryWritesCollection defines the name of the "registry_writes"
+	collRegistryReads = "registry_reads"
+	// collRegistryWrites defines the name of the "registry_writes"
 	// collection within skynet's database.
-	dbRegistryWritesCollection = "registry_writes"
-	// dbEmails defines the name of the "emails" collection within skynet's
+	collRegistryWrites = "registry_writes"
+	// collEmails defines the name of the "emails" collection within skynet's
 	// database.
-	dbEmails = "emails"
-	// dbChallenges defines the name of the "challenges" collection within
+	collEmails = "emails"
+	// collChallenges defines the name of the "challenges" collection within
 	// skynet's database.
-	dbChallenges = "challenges"
-	// dbUnconfirmedUserUpdates defines the name of the collection which holds
+	collChallenges = "challenges"
+	// collUnconfirmedUserUpdates defines the name of the collection which holds
 	// all user pubKey updates until their respective challenge has been
 	// responded to and they are applied.
-	dbUnconfirmedUserUpdates = "unconfirmed_user_updates"
-	// dbConfiguration defines the name of the db table with configuration
+	collUnconfirmedUserUpdates = "unconfirmed_user_updates"
+	// collConfiguration defines the name of the db table with configuration
 	// settings.
-	dbConfiguration = "configuration"
+	collConfiguration = "configuration"
+	// collAPIKeys defines the name of the db table with API keys for users.
+	collAPIKeys = "api_keys"
 
 	// DefaultPageSize defines the default number of records to return.
 	DefaultPageSize = 10
@@ -94,6 +96,7 @@ type (
 		staticChallenges             *mongo.Collection
 		staticUnconfirmedUserUpdates *mongo.Collection
 		staticConfiguration          *mongo.Collection
+		staticAPIKeys                *mongo.Collection
 		staticDeps                   lib.Dependencies
 		staticLogger                 *logrus.Logger
 	}
@@ -124,29 +127,29 @@ func NewCustomDB(ctx context.Context, dbName string, creds DBCredentials, logger
 	if err != nil {
 		return nil, errors.AddContext(err, "failed to connect to DB")
 	}
-	database := c.Database(dbName)
+	db := c.Database(dbName)
 	if logger == nil {
 		logger = &logrus.Logger{}
 	}
-	err = ensureDBSchema(ctx, database, logger)
+	err = ensureDBSchema(ctx, db, Schema, logger)
 	if err != nil {
 		return nil, err
 	}
-	db := &DB{
-		staticDB:                     database,
-		staticUsers:                  database.Collection(dbUsersCollection),
-		staticSkylinks:               database.Collection(dbSkylinksCollection),
-		staticUploads:                database.Collection(dbUploadsCollection),
-		staticDownloads:              database.Collection(dbDownloadsCollection),
-		staticRegistryReads:          database.Collection(dbRegistryReadsCollection),
-		staticRegistryWrites:         database.Collection(dbRegistryWritesCollection),
-		staticEmails:                 database.Collection(dbEmails),
-		staticChallenges:             database.Collection(dbChallenges),
-		staticUnconfirmedUserUpdates: database.Collection(dbUnconfirmedUserUpdates),
-		staticConfiguration:          database.Collection(dbConfiguration),
+	return &DB{
+		staticDB:                     db,
+		staticUsers:                  db.Collection(collUsers),
+		staticSkylinks:               db.Collection(collSkylinks),
+		staticUploads:                db.Collection(collUploads),
+		staticDownloads:              db.Collection(collDownloads),
+		staticRegistryReads:          db.Collection(collRegistryReads),
+		staticRegistryWrites:         db.Collection(collRegistryWrites),
+		staticEmails:                 db.Collection(collEmails),
+		staticChallenges:             db.Collection(collChallenges),
+		staticUnconfirmedUserUpdates: db.Collection(collUnconfirmedUserUpdates),
+		staticConfiguration:          db.Collection(collConfiguration),
+		staticAPIKeys:                db.Collection(collAPIKeys),
 		staticLogger:                 logger,
-	}
-	return db, nil
+	}, nil
 }
 
 // Disconnect closes the connection to the database in an orderly fashion.
@@ -184,104 +187,32 @@ func connectionString(creds DBCredentials) string {
 // creates them if needed.
 // See https://docs.mongodb.com/manual/indexes/
 // See https://docs.mongodb.com/manual/core/index-unique/
-func ensureDBSchema(ctx context.Context, db *mongo.Database, log *logrus.Logger) error {
-	// schema defines a mapping between a collection name and the indexes that
-	// must exist for that collection.
-	schema := map[string][]mongo.IndexModel{
-		dbUsersCollection: {
-			{
-				Keys:    bson.D{{"sub", 1}},
-				Options: options.Index().SetName("sub_unique").SetUnique(true),
-			},
-		},
-		dbSkylinksCollection: {
-			{
-				Keys:    bson.D{{"skylink", 1}},
-				Options: options.Index().SetName("skylink_unique").SetUnique(true),
-			},
-		},
-		dbUploadsCollection: {
-			{
-				Keys:    bson.D{{"user_id", 1}},
-				Options: options.Index().SetName("user_id"),
-			},
-			{
-				Keys:    bson.D{{"skylink_id", 1}},
-				Options: options.Index().SetName("skylink_id"),
-			},
-		},
-		dbDownloadsCollection: {
-			{
-				Keys:    bson.D{{"user_id", 1}},
-				Options: options.Index().SetName("user_id"),
-			},
-			{
-				Keys:    bson.D{{"skylink_id", 1}},
-				Options: options.Index().SetName("skylink_id"),
-			},
-		},
-		dbRegistryReadsCollection: {
-			{
-				Keys:    bson.D{{"user_id", 1}},
-				Options: options.Index().SetName("user_id"),
-			},
-		},
-		dbRegistryWritesCollection: {
-			{
-				Keys:    bson.D{{"user_id", 1}},
-				Options: options.Index().SetName("user_id"),
-			},
-		},
-		dbEmails: {
-			{
-				Keys:    bson.D{{"failed_attempts", 1}},
-				Options: options.Index().SetName("failed_attempts"),
-			},
-			{
-				Keys:    bson.D{{"locked_by", 1}},
-				Options: options.Index().SetName("locked_by"),
-			},
-			{
-				Keys:    bson.D{{"sent_at", 1}},
-				Options: options.Index().SetName("sent_at"),
-			},
-			{
-				Keys:    bson.D{{"sent_by", 1}},
-				Options: options.Index().SetName("sent_by"),
-			},
-		},
-		dbChallenges: {
-			{
-				Keys:    bson.D{{"challenge", 1}},
-				Options: options.Index().SetName("challenge"),
-			},
-			{
-				Keys:    bson.D{{"type", 1}},
-				Options: options.Index().SetName("type"),
-			},
-			{
-				Keys:    bson.D{{"expires_at", 1}},
-				Options: options.Index().SetName("expires_at"),
-			},
-		},
-		dbUnconfirmedUserUpdates: {
-			{
-				Keys:    bson.D{{"challenge_id", 1}},
-				Options: options.Index().SetName("challenge_id"),
-			},
-			{
-				Keys:    bson.D{{"expires_at", 1}},
-				Options: options.Index().SetName("expires_at"),
-			},
-		},
-		dbConfiguration: {
-			{
-				Keys:    bson.D{{"key", 1}},
-				Options: options.Index().SetName("key_unique").SetUnique(true),
-			},
-		},
+func ensureDBSchema(ctx context.Context, db *mongo.Database, schema map[string][]mongo.IndexModel, log *logrus.Logger) error {
+	// Drop collections we no longer need.
+	err := db.Collection(collRegistryReads).Drop(ctx)
+	if err != nil {
+		return err
 	}
-
+	err = db.Collection(collRegistryWrites).Drop(ctx)
+	if err != nil {
+		return err
+	}
+	// Drop indexes we no longer need.
+	_, err = db.Collection(collUsers).Indexes().DropOne(ctx, "email_unique")
+	// We want to ignore IndexNotFound errors - we'll have that each time we run
+	// this code after the initial run on which we drop the index.
+	// We also want to ignore NamespaceNotFound errors - we'll have that on the
+	// very first run of the service when users collection doesn't exist, yet.
+	// We don't want to worry new portal operators and waste their time.
+	// All other errors we want to log for informational purposes but we don't
+	// want to return an error and prevent the service from running - if there
+	// is any issue with the database that would affect the operation of the
+	// service, it will surface during the next step where we ensure collections
+	// indexes exist.
+	if err != nil && !strings.Contains(err.Error(), "IndexNotFound") && !strings.Contains(err.Error(), "NamespaceNotFound") {
+		log.Debugf("Error while dropping index '%s': %v", "email_unique", err)
+	}
+	// Ensure current schema.
 	for collName, models := range schema {
 		coll, err := ensureCollection(ctx, db, collName)
 		if err != nil {

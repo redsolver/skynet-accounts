@@ -36,7 +36,7 @@ type (
 	}
 )
 
-// ReadConfigValue reads the value for the given key from the dbConfiguration
+// ReadConfigValue reads the value for the given key from the collConfiguration
 // table.
 func (db *DB) ReadConfigValue(ctx context.Context, key string) (string, error) {
 	sr := db.staticConfiguration.FindOne(ctx, bson.M{"key": key})
@@ -51,12 +51,10 @@ func (db *DB) ReadConfigValue(ctx context.Context, key string) (string, error) {
 	return option.Value, nil
 }
 
-// WriteConfigValue writes the value for the given key to the dbConfiguration
+// WriteConfigValue writes the value for the given key to the collConfiguration
 // table.
 func (db *DB) WriteConfigValue(ctx context.Context, key, value string) error {
-	opts := &options.ReplaceOptions{
-		Upsert: &True,
-	}
+	opts := options.Replace().SetUpsert(true)
 	ur, err := db.staticConfiguration.ReplaceOne(ctx, bson.M{"key": key}, bson.M{"key": key, "value": value}, opts)
 	if err != nil {
 		return err

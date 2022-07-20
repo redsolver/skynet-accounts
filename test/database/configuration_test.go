@@ -4,7 +4,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/SkynetLabs/skynet-accounts/database"
 	"github.com/SkynetLabs/skynet-accounts/test"
 	"gitlab.com/NebulousLabs/errors"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -13,9 +12,12 @@ import (
 // TestConfiguration ensures we can correctly read and write from/to the
 // configuration DB table.
 func TestConfiguration(t *testing.T) {
+	if testing.Short() {
+		t.SkipNow()
+	}
 	ctx := context.Background()
 	dbName := test.DBNameForTest(t.Name())
-	db, err := database.NewCustomDB(ctx, dbName, test.DBTestCredentials(), nil)
+	db, err := test.NewDatabase(ctx, dbName)
 	if err != nil {
 		t.Fatal(err)
 	}
