@@ -66,7 +66,7 @@ var (
 			UploadBandwidth:   10000 * mbpsToBytesPerSecond,
 			DownloadBandwidth: 10000 * mbpsToBytesPerSecond,
 			MaxUploadSize:     100 * skynet.TiB,
-			MaxNumberUploads:  1000 * filesAllowedPerTB,
+			MaxNumberUploads:  1000 * filesAllowedPerTiB,
 			RegistryDelay:     0,
 			Storage:           1000 * skynet.TiB,
 		},
