@@ -63,12 +63,12 @@ var (
 		},
 		TierFree: {
 			TierName:          "free",
-			UploadBandwidth:   10 * mbpsToBytesPerSecond,
-			DownloadBandwidth: 40 * mbpsToBytesPerSecond,
-			MaxUploadSize:     100 * skynet.GiB,
-			MaxNumberUploads:  0.1 * filesAllowedPerTiB,
-			RegistryDelay:     125,
-			Storage:           100 * skynet.GiB,
+			UploadBandwidth:   10000 * mbpsToBytesPerSecond,
+			DownloadBandwidth: 10000 * mbpsToBytesPerSecond,
+			MaxUploadSize:     100 * skynet.TiB,
+			MaxNumberUploads:  1000 * filesAllowedPerTB,
+			RegistryDelay:     0,
+			Storage:           1000 * skynet.TiB,
 		},
 		TierPremium5: {
 			TierName:          "plus",
