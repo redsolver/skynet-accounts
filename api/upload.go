@@ -1,7 +1,9 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/SkynetLabs/skynet-accounts/database"
@@ -9,6 +11,12 @@ import (
 	"github.com/julienschmidt/httprouter"
 	"gitlab.com/NebulousLabs/errors"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+)
+
+var (
+	// ErrTimePeriodTooLong is returned when the user requests unacceptably long
+	// time period.
+	ErrTimePeriodTooLong = errors.New("given time period is too long")
 )
 
 type (
@@ -19,13 +27,17 @@ type (
 		Sub      string
 		StripeID string
 	}
-
 	// UploadInfo gives information about a given upload.
 	UploadInfo struct {
 		Skylink    string
 		UploaderIP string
 		UploadedAt time.Time
 		UploaderInfo
+	}
+	// SkylinksList represents a list of skylinks.
+	SkylinksList struct {
+		Skylinks   []string `json:"skylinks"`
+		TotalCount int      `json:"totalCount"`
 	}
 )
 
@@ -83,4 +95,89 @@ func (api *API) uploadInfoGET(_ *database.User, w http.ResponseWriter, req *http
 		}
 	}
 	api.WriteJSON(w, upInfos)
+}
+
+// uploadedSkylinksGET lists all uploads from the given time range.
+func (api *API) uploadedSkylinksGET(_ *database.User, w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
+	from, err := parseInt64Param(req, "from")
+	if err != nil {
+		api.WriteError(w, err, http.StatusBadRequest)
+		return
+	}
+	to, err := parseInt64Param(req, "to")
+	if err != nil {
+		api.WriteError(w, err, http.StatusBadRequest)
+		return
+	}
+	offset, err := fetchOffset(req.Form)
+	if err != nil {
+		api.WriteError(w, err, http.StatusBadRequest)
+		return
+	}
+	pageSize, err := fetchPageSize(req.Form, DefaultPageSizeLarge)
+	if err != nil {
+		api.WriteError(w, err, http.StatusBadRequest)
+		return
+	}
+	dayInSecs := int64(24 * 3600)
+	defaultPeriod := 3 * dayInSecs
+	maxPeriod := 30 * dayInSecs
+	if to == 0 && from == 0 {
+		// We're adding a extra second to account for the rounding down that
+		// happens when truncating time to seconds.
+		to = time.Now().UTC().Add(time.Second).Unix()
+		from = to - defaultPeriod
+	} else if to == 0 {
+		to = from + defaultPeriod
+	} else if from == 0 {
+		from = to - defaultPeriod
+	}
+	if to-from > maxPeriod {
+		api.WriteError(w, ErrTimePeriodTooLong, http.StatusBadRequest)
+		return
+	}
+	// Fetch all uploads from the period.
+	uploads, totalCount, err := api.staticDB.UploadsByPeriod(req.Context(), time.Unix(from, 0), time.Unix(to, 0), offset, pageSize)
+	if errors.Contains(err, database.ErrInvalidTimePeriod) {
+		api.WriteError(w, err, http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		api.WriteError(w, errors.AddContext(err, "failed to fetch uploads from DB"), http.StatusInternalServerError)
+		return
+	}
+	resp := SkylinksList{
+		Skylinks:   CollectUniqueSkylinks(uploads),
+		TotalCount: int(totalCount),
+	}
+	api.WriteJSON(w, resp)
+}
+
+// CollectUniqueSkylinks is a helper that iterates over upload responses and
+// returns a deduplicated list of the uploaded skylinks.
+func CollectUniqueSkylinks(uploads []database.UploadResponse) []string {
+	// Add all skylinks to a set, so they are deduplicated.
+	slsMap := make(map[string]struct{})
+	for _, u := range uploads {
+		slsMap[u.Skylink] = struct{}{}
+	}
+	// Collect them in a slice.
+	sls := make([]string, 0, len(slsMap))
+	for s := range slsMap {
+		sls = append(sls, s)
+	}
+	return sls
+}
+
+// parseInt64Param is a helper that parses an integer parameter.
+func parseInt64Param(req *http.Request, name string) (int64, error) {
+	var val int64
+	var err error
+	if str := req.FormValue(name); str != "" {
+		val, err = strconv.ParseInt(str, 10, 0)
+		if err != nil {
+			return 0, errors.AddContext(err, fmt.Sprintf("invalid '%s' value", name))
+		}
+	}
+	return val, nil
 }

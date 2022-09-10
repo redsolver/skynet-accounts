@@ -1,8 +1,8 @@
 package database
 
 import (
+	"bytes"
 	"context"
-	"crypto/subtle"
 	"fmt"
 	"net/mail"
 	"time"
@@ -10,6 +10,7 @@ import (
 	"github.com/SkynetLabs/skynet-accounts/hash"
 	"github.com/SkynetLabs/skynet-accounts/lib"
 	"github.com/SkynetLabs/skynet-accounts/skynet"
+	"github.com/SkynetLabs/skynet-accounts/test/dependencies"
 	"github.com/SkynetLabs/skynet-accounts/types"
 	"gitlab.com/NebulousLabs/errors"
 	"gitlab.com/SkynetLabs/skyd/build"
@@ -17,7 +18,6 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"go.mongodb.org/mongo-driver/mongo/readpref"
 )
 
 const (
@@ -354,8 +354,7 @@ func (db *DB) UserCreateEmailConfirmation(ctx context.Context, uID primitive.Obj
 			"email_confirmation_token_expiration": exp,
 		},
 	}
-	opts := options.Update().SetUpsert(false)
-	_, err = db.staticUsers.UpdateOne(ctx, filter, update, opts)
+	_, err = db.staticUsers.UpdateOne(ctx, filter, update)
 	if err != nil {
 		return "", err
 	}
@@ -486,6 +485,9 @@ func (db *DB) UserDelete(ctx context.Context, u *User) error {
 
 // UserSave saves the user to the DB.
 func (db *DB) UserSave(ctx context.Context, u *User) error {
+	if db.staticDeps.Disrupt("DependencyMongoWriteConflictN") {
+		return errors.New(dependencies.DependencyMongoWriteConflictNMessage)
+	}
 	filter := bson.M{"_id": u.ID}
 	opts := options.Replace().SetUpsert(true)
 	_, err := db.staticUsers.ReplaceOne(ctx, filter, u, opts)
@@ -554,21 +556,15 @@ func (db *DB) UserSetTier(ctx context.Context, u *User, t int) error {
 	}
 	filter := bson.M{"_id": u.ID}
 	update := bson.M{"$set": bson.M{"tier": t}}
-	opts := options.Update().SetUpsert(true)
-	_, err := db.staticUsers.UpdateOne(ctx, filter, update, opts)
+	ur, err := db.staticUsers.UpdateOne(ctx, filter, update)
 	if err != nil {
 		return errors.AddContext(err, "failed to update")
 	}
+	if ur.MatchedCount == 0 {
+		return mongo.ErrNoDocuments
+	}
 	u.Tier = t
 	return nil
-}
-
-// Ping sends a ping command to verify that the client can connect to the DB and
-// specifically to the primary.
-func (db *DB) Ping(ctx context.Context) error {
-	ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	return db.staticDB.Client().Ping(ctx2, readpref.Primary())
 }
 
 // managedUsersByField finds all users that have a given field value.
@@ -620,7 +616,7 @@ func (db *DB) managedUserBySub(ctx context.Context, sub string) (*User, error) {
 // user.
 func (u User) HasKey(pk PubKey) bool {
 	for _, upk := range u.PubKeys {
-		if subtle.ConstantTimeCompare(upk, pk) == 1 {
+		if bytes.Equal(upk, pk) {
 			return true
 		}
 	}

@@ -6,10 +6,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/SkynetLabs/skynet-accounts/database"
 	"github.com/SkynetLabs/skynet-accounts/email"
 	"github.com/SkynetLabs/skynet-accounts/jwt"
+	"github.com/SkynetLabs/skynet-accounts/lib"
 	"github.com/SkynetLabs/skynet-accounts/metafetcher"
 	"github.com/sirupsen/logrus"
 	"gitlab.com/NebulousLabs/errors"
@@ -65,12 +68,24 @@ func ExtractCookie(r *http.Response) *http.Cookie {
 
 // NewDatabase returns a new DB connection based on the passed parameters.
 func NewDatabase(ctx context.Context, dbName string) (*database.DB, error) {
-	return database.NewCustomDB(ctx, SanitizeName(dbName), DBTestCredentials(), NewDiscardLogger())
+	return database.NewCustomDB(ctx, SanitizeName(dbName), DBTestCredentials(), NewDiscardLogger(), nil)
+}
+
+// NewDatabaseWithDeps returns a new DB connection with custom dependencies.
+func NewDatabaseWithDeps(ctx context.Context, dbName string, deps lib.Dependencies) (*database.DB, error) {
+	return database.NewCustomDB(ctx, SanitizeName(dbName), DBTestCredentials(), NewDiscardLogger(), deps)
 }
 
 // NewAccountsTester creates and starts a new AccountsTester service.
 // Use the Close method for a graceful shutdown.
-func NewAccountsTester(dbName string) (*AccountsTester, error) {
+func NewAccountsTester(dbName string, promoter api.Promoter, deps lib.Dependencies) (*AccountsTester, error) {
+	// Make sure we have valid dependencies.
+	if deps == nil {
+		deps = &lib.ProductionDependencies{}
+	}
+	if promoter == "" {
+		promoter = api.PromoterStripe
+	}
 	ctx := context.Background()
 	logger := NewDiscardLogger()
 
@@ -83,7 +98,7 @@ func NewAccountsTester(dbName string) (*AccountsTester, error) {
 	}
 
 	// Connect to the database.
-	db, err := NewDatabase(ctx, dbName)
+	db, err := NewDatabaseWithDeps(ctx, dbName, deps)
 	if err != nil {
 		return nil, errors.AddContext(err, "failed to connect to the DB")
 	}
@@ -101,7 +116,7 @@ func NewAccountsTester(dbName string) (*AccountsTester, error) {
 	mf := metafetcher.New(ctxWithCancel, db, logger)
 
 	// The server API encapsulates all the modules together.
-	server, err := api.New(db, mf, logger, email.NewMailer(db))
+	server, err := api.NewCustom(db, mf, logger, email.NewMailer(db), promoter, deps)
 	if err != nil {
 		cancel()
 		return nil, errors.AddContext(err, "failed to build the API")
@@ -311,7 +326,7 @@ func (at *AccountsTester) executeRequest(req *http.Request) (*http.Response, []b
 //
 // NOTE: The Body of the returned response is already read and closed.
 func processResponse(r *http.Response) (*http.Response, []byte, error) {
-	body, err := ioutil.ReadAll(r.Body)
+	body, err := io.ReadAll(r.Body)
 	_ = r.Body.Close()
 	// For convenience, whenever we have a non-OK status we'll wrap it in an
 	// error.
@@ -338,6 +353,30 @@ func (at *AccountsTester) LoginCredentialsPOST(emailAddr, password string) (*htt
 	params.Set("email", emailAddr)
 	params.Set("password", password)
 	return at.post("/login", nil, params)
+}
+
+// LoginCredentialsPOSTWithTTL logs the user in and returns a response.
+//
+// NOTE: The Body of the returned response is already read and closed.
+func (at *AccountsTester) LoginCredentialsPOSTWithTTL(emailAddr, password string, ttl int) (*http.Response, []byte, error) {
+	body := struct {
+		Email    string
+		Password string
+		TTL      int
+	}{
+		emailAddr,
+		password,
+		ttl,
+	}
+	b, err := json.Marshal(body)
+	if err != nil {
+		return nil, nil, err
+	}
+	r, err := at.Request(http.MethodPost, "/login", nil, b, nil, nil)
+	if err != nil {
+		return r, nil, err
+	}
+	return processResponse(r)
 }
 
 // LoginPubKeyGET performs `GET /login`
@@ -666,6 +705,27 @@ func (at *AccountsTester) UploadInfo(sl string) ([]api.UploadInfo, int, error) {
 	return resp, r.StatusCode, nil
 }
 
+// UploadedSkylinks performs a `GET /uploadedskylinks` request.
+func (at *AccountsTester) UploadedSkylinks(from, to int64) (api.SkylinksList, int, error) {
+	queryParams := url.Values{}
+	queryParams.Set("from", strconv.FormatInt(from, 10))
+	queryParams.Set("to", strconv.FormatInt(to, 10))
+	var resp api.SkylinksList
+	r, err := at.Request(http.MethodGet, "/uploadedskylinks", queryParams, nil, nil, &resp)
+	if err != nil {
+		return api.SkylinksList{}, r.StatusCode, err
+	}
+	if r.StatusCode != http.StatusOK {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return api.SkylinksList{}, http.StatusInternalServerError, errors.AddContext(err, "failed to read error")
+		}
+		_ = r.Body.Close()
+		return api.SkylinksList{}, r.StatusCode, errors.New(string(body))
+	}
+	return resp, r.StatusCode, nil
+}
+
 /*** Stripe helpers ***/
 
 // StripeBillingGET performs a `GET /stripe/billing`
@@ -708,6 +768,13 @@ func (at *AccountsTester) StripeCheckoutPOST(price string) (string, int, error) 
 	return resp.SessionID, r.StatusCode, err
 }
 
+// StripeCheckoutIDGET performs a `GET /stripe/checkout/:checkout_id`
+func (at *AccountsTester) StripeCheckoutIDGET(id string) (api.SubscriptionGET, int, error) {
+	var resp api.SubscriptionGET
+	r, err := at.Request(http.MethodGet, "/stripe/checkout/"+id, nil, nil, nil, &resp)
+	return resp, r.StatusCode, err
+}
+
 // StripePricesGET performs a `GET /stripe/prices`
 func (at *AccountsTester) StripePricesGET() ([]api.StripePrice, int, error) {
 	resp := make([]api.StripePrice, 0)
@@ -716,4 +783,17 @@ func (at *AccountsTester) StripePricesGET() ([]api.StripePrice, int, error) {
 		return nil, r.StatusCode, err
 	}
 	return resp, r.StatusCode, nil
+}
+
+/*** Promoter helpers ***/
+
+// PromoterSetTierPOST performs a `POST /promoter/settier/:sub`
+func (at *AccountsTester) PromoterSetTierPOST(sub string, tier int) (int, error) {
+	body := api.PromoterSetTierPOST{tier}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return http.StatusInternalServerError, err
+	}
+	r, err := at.Request(http.MethodPost, "/promoter/settier/"+sub, nil, bodyBytes, nil, nil)
+	return r.StatusCode, err
 }

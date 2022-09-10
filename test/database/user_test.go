@@ -1,11 +1,13 @@
 package database
 
 import (
+	"bytes"
 	"context"
-	"crypto/subtle"
 	"reflect"
 	"testing"
 	"time"
+
+	"go.mongodb.org/mongo-driver/mongo"
 
 	"github.com/SkynetLabs/skynet-accounts/database"
 	"github.com/SkynetLabs/skynet-accounts/lib"
@@ -359,7 +361,7 @@ func TestUserCreateEmailConfirmation(t *testing.T) {
 	}
 	ctx := context.Background()
 	dbName := test.DBNameForTest(t.Name())
-	db, err := database.NewCustomDB(ctx, dbName, test.DBTestCredentials(), nil)
+	db, err := database.NewCustomDB(ctx, dbName, test.DBTestCredentials(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,7 +519,7 @@ func TestUserPubKey(t *testing.T) {
 	}
 	ctx := context.Background()
 	dbName := test.DBNameForTest(t.Name())
-	db, err := database.NewCustomDB(ctx, dbName, test.DBTestCredentials(), nil)
+	db, err := database.NewCustomDB(ctx, dbName, test.DBTestCredentials(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -547,7 +549,7 @@ func TestUserPubKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(u1.PubKeys) == 1 && subtle.ConstantTimeCompare(u1.PubKeys[0][:], pk[:]) != 1 {
+	if len(u1.PubKeys) == 1 && !bytes.Equal(u1.PubKeys[0][:], pk[:]) {
 		t.Fatalf("Expected the user to have a single pubkey which matches ours. Got %+v, pubkey %+v", u1.PubKeys, pk)
 	}
 	// Add another.
@@ -559,7 +561,7 @@ func TestUserPubKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(u2.PubKeys) == 2 && subtle.ConstantTimeCompare(u1.PubKeys[1][:], pk1[:]) == 1 {
+	if len(u2.PubKeys) == 2 && bytes.Equal(u1.PubKeys[1][:], pk1[:]) {
 		t.Fatalf("Expected the user to have a single pubkey which matches ours. Got %+v, pubkey %+v", u2.PubKeys, pk1)
 	}
 	// Delete a pubkey.
@@ -571,7 +573,7 @@ func TestUserPubKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(u3.PubKeys) == 1 && subtle.ConstantTimeCompare(u3.PubKeys[0][:], pk1[:]) == 1 {
+	if len(u3.PubKeys) == 1 && bytes.Equal(u3.PubKeys[0][:], pk1[:]) {
 		t.Fatalf("Expected the user to have a single pubkey which matches ours. Got %+v, pubkey %+v", u3.PubKeys, pk1)
 	}
 	// Make sure UserPubKeyRemove removes all copies of the pubkey from the set.
@@ -614,7 +616,7 @@ func TestUserSetTier(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func(user *database.User) {
-		err := db.UserDelete(ctx, user)
+		err = db.UserDelete(ctx, user)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -629,6 +631,16 @@ func TestUserSetTier(t *testing.T) {
 	}
 	if u2.Tier != database.TierPremium80 {
 		t.Fatalf("Expected tier %d got %d.\n", database.TierPremium80, u2.Tier)
+	}
+	// Set the tier of a non-existent user. Expect this to fail.
+	sub, _ := lib.GenerateUUID()
+	uNon := &database.User{
+		Email: types.Email(t.Name() + "_non@siasky.net"),
+		Sub:   sub,
+	}
+	err = db.UserSetTier(ctx, uNon, database.TierPremium80)
+	if err == nil || !errors.Contains(err, mongo.ErrNoDocuments) {
+		t.Fatalf("Expected '%v', got '%v'", mongo.ErrNoDocuments, err)
 	}
 }
 

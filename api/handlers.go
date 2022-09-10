@@ -3,8 +3,8 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/mail"
@@ -28,6 +28,12 @@ import (
 )
 
 const (
+	// DefaultPageSizeSmall is the number of records we return when none is
+	// given and the objects are relatively large.
+	DefaultPageSizeSmall = 10
+	// DefaultPageSizeLarge is the number of records we return when none is
+	// given and the objects are relatively small.
+	DefaultPageSizeLarge = 1000
 	// LimitBodySizeSmall defines a size limit for requests that we don't expect
 	// to contain a lot of data.
 	LimitBodySizeSmall = 4 * skynet.KiB
@@ -66,9 +72,20 @@ type (
 		PageSize int                         `json:"pageSize"`
 		Count    int                         `json:"count"`
 	}
-	// HealthGET is the response type of GET /health
+	// HealthGET is the response type of GET /health.
+	// Primary field is only populated on error.
 	HealthGET struct {
-		DBAlive bool `json:"dbAlive"`
+		DBAlive bool   `json:"dbAlive"`
+		Error   error  `json:"error,omitempty"`
+		Primary string `json:"primary,omitempty"`
+	}
+	// ExtendedHealth is a comprehensive set of information about the health
+	// of the DB node which includes some sensitive information. That's why we
+	// only log that data and we don't return it to callers.
+	ExtendedHealth struct {
+		Health                   *HealthGET      `json:"health"`
+		Hello                    *database.Hello `json:"hello"`
+		NumberSessionsInProgress int             `json:"numberSessionsInProgress"`
 	}
 	// LimitsGET provides public information of the various limits this
 	// portal has.
@@ -130,6 +147,11 @@ type (
 		Password string      `json:"password"`
 	}
 
+	// loginTTL defines the lifetime of the JWT issued on login.
+	loginTTL struct {
+		TTL int `json:"TTL"`
+	}
+
 	// userUpdatePUT defines the fields of the User record that can be changed
 	// externally, e.g. by calling `PUT /user`.
 	userUpdatePUT struct {
@@ -141,9 +163,38 @@ type (
 
 // healthGET returns the status of the service
 func (api *API) healthGET(_ *database.User, w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
-	var status HealthGET
+	// The public status that we'll return as response to this call.
+	status := &HealthGET{
+		DBAlive: true,
+	}
+	// Extended health status that we'll log for the benefit of the service's
+	// administrators.
+	extHealth := ExtendedHealth{
+		Health:                   status,
+		NumberSessionsInProgress: api.staticDB.NumberSessionsInProgress(),
+	}
+	// Ensure that we log the extended health information after we gather as
+	// much of it as possible.
+	defer func() {
+		b, err := json.Marshal(extHealth)
+		if err != nil {
+			api.staticLogger.Warnf("Failed to serialize extended health information. Error: %v", err)
+		}
+		api.staticLogger.Info(string(b))
+	}()
+
 	err := api.staticDB.Ping(req.Context())
-	status.DBAlive = err == nil
+	if err != nil {
+		status.DBAlive = false
+		status.Error = errors.Compose(status.Error, err)
+	}
+	hello, err := api.staticDB.Hello(req.Context())
+	if err != nil {
+		status.Error = errors.Compose(status.Error, err)
+	} else {
+		extHealth.Hello = hello
+	}
+
 	api.WriteJSON(w, status)
 }
 
@@ -183,10 +234,25 @@ func (api *API) loginGET(_ *database.User, w http.ResponseWriter, req *http.Requ
 // loginPOST starts a user session by issuing a cookie
 func (api *API) loginPOST(_ *database.User, w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
 	// Get the body, we might need to use it several times.
-	body, err := ioutil.ReadAll(io.LimitReader(req.Body, LimitBodySizeSmall))
+	body, err := io.ReadAll(io.LimitReader(req.Body, LimitBodySizeSmall))
 	if err != nil {
 		api.WriteError(w, errors.AddContext(err, "failed to read request body"), http.StatusBadRequest)
 		return
+	}
+
+	// Use custom JWT TTL if defined in the request.
+	var jwtTTL loginTTL
+	err = json.Unmarshal(body, &jwtTTL)
+	if err != nil {
+		api.WriteError(w, err, http.StatusBadRequest)
+		return
+	}
+	if jwtTTL.TTL > jwt.TTL {
+		api.WriteError(w, fmt.Errorf("jwt ttl value is too high. it cannot exceed %d", jwt.TTL), http.StatusBadRequest)
+		return
+	}
+	if jwtTTL.TTL <= 0 {
+		jwtTTL.TTL = jwt.TTL
 	}
 
 	// Since we don't want to have separate endpoints for logging in with
@@ -198,7 +264,7 @@ func (api *API) loginPOST(_ *database.User, w http.ResponseWriter, req *http.Req
 	var payload credentialsPOST
 	err = json.Unmarshal(body, &payload)
 	if err == nil && payload.Email != "" && payload.Password != "" {
-		api.loginPOSTCredentials(w, req, payload.Email, payload.Password)
+		api.loginPOSTCredentials(w, req, payload.Email, payload.Password, jwtTTL.TTL)
 		return
 	}
 
@@ -206,7 +272,7 @@ func (api *API) loginPOST(_ *database.User, w http.ResponseWriter, req *http.Req
 	var chr database.ChallengeResponse
 	err = chr.LoadFromBytes(body)
 	if err == nil {
-		api.loginPOSTChallengeResponse(w, req, chr)
+		api.loginPOSTChallengeResponse(w, req, chr, jwtTTL.TTL)
 		return
 	}
 
@@ -216,7 +282,7 @@ func (api *API) loginPOST(_ *database.User, w http.ResponseWriter, req *http.Req
 }
 
 // loginPOSTChallengeResponse is a helper that handles logins with a challenge.
-func (api *API) loginPOSTChallengeResponse(w http.ResponseWriter, req *http.Request, chr database.ChallengeResponse) {
+func (api *API) loginPOSTChallengeResponse(w http.ResponseWriter, req *http.Request, chr database.ChallengeResponse, jwtTTL int) {
 	ctx := req.Context()
 	pk, _, err := api.staticDB.ValidateChallengeResponse(ctx, chr, database.ChallengeTypeLogin)
 	if err != nil {
@@ -228,11 +294,11 @@ func (api *API) loginPOSTChallengeResponse(w http.ResponseWriter, req *http.Requ
 		api.WriteError(w, ErrInvalidCredentials, http.StatusUnauthorized)
 		return
 	}
-	api.loginUser(w, u, false)
+	api.loginUser(w, u, jwtTTL, false)
 }
 
 // loginPOSTCredentials is a helper that handles logins with credentials.
-func (api *API) loginPOSTCredentials(w http.ResponseWriter, req *http.Request, email types.Email, password string) {
+func (api *API) loginPOSTCredentials(w http.ResponseWriter, req *http.Request, email types.Email, password string, jwtTTL int) {
 	// Fetch the user with that email, if they exist.
 	u, err := api.staticDB.UserByEmail(req.Context(), email)
 	if err != nil {
@@ -246,7 +312,7 @@ func (api *API) loginPOSTCredentials(w http.ResponseWriter, req *http.Request, e
 		api.WriteError(w, ErrInvalidCredentials, http.StatusUnauthorized)
 		return
 	}
-	api.loginUser(w, u, false)
+	api.loginUser(w, u, jwtTTL, false)
 }
 
 // loginPOSTToken is a helper that handles logins via a token attached to the
@@ -281,9 +347,9 @@ func (api *API) loginPOSTToken(w http.ResponseWriter, req *http.Request) {
 
 // loginUser is a helper method that generates a JWT for the user and writes the
 // login cookie.
-func (api *API) loginUser(w http.ResponseWriter, u *database.User, returnUser bool) {
+func (api *API) loginUser(w http.ResponseWriter, u *database.User, jwtTTL int, returnUser bool) {
 	// Generate a JWT.
-	tk, err := jwt.TokenForUser(u.Email, u.Sub)
+	tk, err := jwt.TokenForUser(u.Email, u.Sub, jwtTTL)
 	if err != nil {
 		api.staticLogger.Debugf("Error creating a token for user: %v", err)
 		err = errors.AddContext(err, "failed to create a token for user")
@@ -370,7 +436,7 @@ func (api *API) registerPOST(_ *database.User, w http.ResponseWriter, req *http.
 		return
 	}
 	// Get the body, we might need to use it several times.
-	body, err := ioutil.ReadAll(io.LimitReader(req.Body, LimitBodySizeSmall))
+	body, err := io.ReadAll(io.LimitReader(req.Body, LimitBodySizeSmall))
 	if err != nil {
 		api.WriteError(w, errors.AddContext(err, "empty request body"), http.StatusBadRequest)
 		return
@@ -414,7 +480,7 @@ func (api *API) registerPOST(_ *database.User, w http.ResponseWriter, req *http.
 	if err != nil {
 		api.staticLogger.Debugln(errors.AddContext(err, "failed to send address confirmation email"))
 	}
-	api.loginUser(w, u, true)
+	api.loginUser(w, u, 0, true)
 }
 
 // userGET returns information about an existing user and create it if it
@@ -649,7 +715,7 @@ func (api *API) userPOST(_ *database.User, w http.ResponseWriter, req *http.Requ
 	if err != nil {
 		api.staticLogger.Debugln(errors.AddContext(err, "failed to send address confirmation email"))
 	}
-	api.loginUser(w, u, true)
+	api.loginUser(w, u, 0, true)
 }
 
 // userPUT allows changing some user information.
@@ -742,6 +808,10 @@ func (api *API) userPUT(u *database.User, w http.ResponseWriter, req *http.Reque
 		changedEmail = true
 	}
 
+	if api.staticDeps.Disrupt("DependencyUserPutMongoDelay") {
+		time.Sleep(100 * time.Millisecond)
+	}
+
 	// Save the changes.
 	err = api.staticDB.UserSave(ctx, u)
 	if err != nil {
@@ -755,7 +825,7 @@ func (api *API) userPUT(u *database.User, w http.ResponseWriter, req *http.Reque
 			api.staticLogger.Debugln(errors.AddContext(err, "failed to send address confirmation email"))
 		}
 	}
-	api.loginUser(w, u, true)
+	api.loginUser(w, u, 0, true)
 }
 
 // userPubKeyDELETE removes a given pubkey from the list of pubkeys associated
@@ -843,7 +913,7 @@ func (api *API) userPubKeyRegisterPOST(u *database.User, w http.ResponseWriter, 
 	// Check if the pubkey is already associated with the current user.
 	if u.HasKey(pk) {
 		// This pubkey already belongs to the user. Log them in and return.
-		api.loginUser(w, u, true)
+		api.loginUser(w, u, 0, true)
 		return
 	}
 	// Check if the pubkey from the UnconfirmedUserUpdate is already associated
@@ -884,7 +954,7 @@ func (api *API) userPubKeyRegisterPOST(u *database.User, w http.ResponseWriter, 
 		api.WriteError(w, err, http.StatusInternalServerError)
 		return
 	}
-	api.loginUser(w, updatedUser, true)
+	api.loginUser(w, updatedUser, 0, true)
 }
 
 // userUploadsGET returns all uploads made by the current user.
@@ -894,7 +964,7 @@ func (api *API) userUploadsGET(u *database.User, w http.ResponseWriter, req *htt
 		return
 	}
 	offset, err1 := fetchOffset(req.Form)
-	pageSize, err2 := fetchPageSize(req.Form)
+	pageSize, err2 := fetchPageSize(req.Form, DefaultPageSizeSmall)
 	if err := errors.Compose(err1, err2); err != nil {
 		api.WriteError(w, err, http.StatusBadRequest)
 		return
@@ -920,7 +990,7 @@ func (api *API) userDownloadsGET(u *database.User, w http.ResponseWriter, req *h
 		return
 	}
 	offset, err1 := fetchOffset(req.Form)
-	pageSize, err2 := fetchPageSize(req.Form)
+	pageSize, err2 := fetchPageSize(req.Form, DefaultPageSizeSmall)
 	if err := errors.Compose(err1, err2); err != nil {
 		api.WriteError(w, err, http.StatusBadRequest)
 		return
@@ -958,7 +1028,7 @@ func (api *API) userConfirmGET(_ *database.User, w http.ResponseWriter, req *htt
 		api.WriteError(w, err, http.StatusInternalServerError)
 		return
 	}
-	api.loginUser(w, u, false)
+	api.loginUser(w, u, 0, false)
 }
 
 // userReconfirmPOST allows the user to request a new email address confirmation
@@ -1106,7 +1176,7 @@ func (api *API) userRecoverPOST(_ *database.User, w http.ResponseWriter, req *ht
 		api.WriteError(w, errors.AddContext(err, "failed to save password"), http.StatusInternalServerError)
 		return
 	}
-	api.loginUser(w, u, false)
+	api.loginUser(w, u, 0, false)
 }
 
 // trackUploadPOST registers a new upload in the system.
@@ -1324,13 +1394,13 @@ func fetchOffset(form url.Values) (int, error) {
 }
 
 // fetchPageSize extracts the page size from the params and validates its value.
-func fetchPageSize(form url.Values) (int, error) {
+func fetchPageSize(form url.Values, defaultPageSize int) (int, error) {
 	pageSize, _ := strconv.Atoi(form.Get("pageSize"))
 	if pageSize < 0 {
 		return 0, errors.New("Invalid page size")
 	}
 	if pageSize == 0 {
-		pageSize = database.DefaultPageSize
+		pageSize = defaultPageSize
 	}
 	return pageSize, nil
 }

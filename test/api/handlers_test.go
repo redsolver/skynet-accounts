@@ -40,12 +40,14 @@ type subtest struct {
 
 // TestHandlers is a meta test that sets up a test instance of accounts and runs
 // a suite of tests that ensure all handlers behave as expected.
+// This test suite uses Stripe as payments handler. For testing handlers that
+// rely on Promoter as payments handler, please use TestPromoterHandlers.
 func TestHandlers(t *testing.T) {
 	if testing.Short() {
 		t.SkipNow()
 	}
 	dbName := test.DBNameForTest(t.Name())
-	at, err := test.NewAccountsTester(dbName)
+	at, err := test.NewAccountsTester(dbName, api.PromoterStripe, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,8 +182,14 @@ func testHandlerLoginPOST(t *testing.T, at *test.AccountsTester) {
 			t.Error(errors.AddContext(err, "failed to delete user in defer"))
 		}
 	}()
-	// Login with an existing user.
-	r, _, err := at.LoginCredentialsPOST(emailAddr.String(), password)
+	// Try to log in with an existing user but set a very long TTL.
+	_, _, err = at.LoginCredentialsPOSTWithTTL(emailAddr.String(), password, jwt.TTL+1)
+	if err == nil || !strings.Contains(err.Error(), "jwt ttl value is too high") {
+		t.Fatalf("Expected error 'jwt ttl value is too high', got '%v'", err)
+	}
+	// Login with an existing user. Set JWT TTL to 100 seconds.
+	ttl := 100
+	r, _, err := at.LoginCredentialsPOSTWithTTL(emailAddr.String(), password, ttl)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,6 +197,10 @@ func testHandlerLoginPOST(t *testing.T, at *test.AccountsTester) {
 	c := test.ExtractCookie(r)
 	if c == nil {
 		t.Fatal("Expected a cookie.")
+	}
+	// Make sure the TTL of the cookie is correct. 2 seconds tolerance.
+	if c.MaxAge > ttl || c.MaxAge < ttl-2 {
+		t.Fatalf("Expected maxAge %d, got %d", ttl, c.MaxAge)
 	}
 	// Login with an email with a different capitalisation.
 	// Expect this to succeed.
@@ -303,7 +315,7 @@ func testUserPUT(t *testing.T, at *test.AccountsTester) {
 	if uNewPassHash.PasswordHash == u.PasswordHash {
 		t.Fatal("Expected the user's password to change but it did not.")
 	}
-	// Check if we can login with the new password.
+	// Check if we can log in with the new password.
 	params := url.Values{}
 	params.Set("email", u.Email.String())
 	params.Set("password", pw)
@@ -552,13 +564,13 @@ func testUserLimits(t *testing.T, at *test.AccountsTester) {
 			return errors.AddContext(err, "failed to call /user/limits")
 		}
 		if tl.TierID != database.TierFree {
-			return fmt.Errorf("Expected to get the results for tier id %d, got %d", database.TierFree, tl.TierID)
+			return fmt.Errorf("expected to get the results for tier id %d, got %d", database.TierFree, tl.TierID)
 		}
 		if tl.TierName != database.UserLimits[database.TierFree].TierName {
-			return fmt.Errorf("Expected tier name '%s', got '%s'", database.UserLimits[database.TierFree].TierName, tl.TierName)
+			return fmt.Errorf("expected tier name '%s', got '%s'", database.UserLimits[database.TierFree].TierName, tl.TierName)
 		}
 		if tl.DownloadBandwidth != database.UserLimits[database.TierAnonymous].DownloadBandwidth {
-			return fmt.Errorf("Expected download bandwidth '%d', got '%d'", database.UserLimits[database.TierAnonymous].DownloadBandwidth, tl.DownloadBandwidth)
+			return fmt.Errorf("expected download bandwidth '%d', got '%d'", database.UserLimits[database.TierAnonymous].DownloadBandwidth, tl.DownloadBandwidth)
 		}
 		return nil
 	})
